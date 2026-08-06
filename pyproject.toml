@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sharp-cloud-python"
+version = "0.1.0"
+description = "Python SDK for Sharp COCORO AIR cloud API"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "Omar Khater" }
+]
+
+dependencies = [
+    "httpx>=0.28.0",
+    "pydantic>=2.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "build",
+    "twine",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.setuptools]
+packages = ["sharp_cloud"]
