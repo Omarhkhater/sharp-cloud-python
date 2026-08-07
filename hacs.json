@@ -1,0 +1,11 @@
+{
+  "name": "Sharp COCORO AIR",
+  "country": [
+    "EG"
+  ],
+  "homeassistant": "2025.1.0",
+  "render_readme": true,
+  "domains": [
+    "sharp_cocoro_air"
+  ]
+}
