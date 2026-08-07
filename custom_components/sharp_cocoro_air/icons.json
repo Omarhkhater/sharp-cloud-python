@@ -1,0 +1,17 @@
+{
+  "entity": {
+    "climate": {
+      "sharp_cocoro_air": {
+        "default": "mdi:air-conditioner"
+      }
+    },
+    "sensor": {
+      "room_temperature": {
+        "default": "mdi:thermometer"
+      },
+      "room_humidity": {
+        "default": "mdi:water-percent"
+      }
+    }
+  }
+}
