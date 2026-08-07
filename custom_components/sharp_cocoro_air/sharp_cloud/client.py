@@ -14,7 +14,10 @@ from .services import (
 class SharpCloud:
     """Main entry point for the Sharp Cloud SDK."""
 
-    def __init__(self, config: SharpConfig | None = None):
+    def __init__(
+        self,
+        config: SharpConfig | None = None,
+    ):
         self.config = config or SharpConfig()
 
         self.http = HttpClient(self.config)
@@ -46,14 +49,47 @@ class SharpCloud:
     def id_token(self) -> str:
         return self.auth.id_token
 
-    def login(self) -> None:
-        self.auth.open_browser()
+    @property
+    def token(self):
+        """Return the current OAuth token."""
+
+        return self.auth.token
+
+    @token.setter
+    def token(self, value):
+        """Set the current OAuth token."""
+
+        self.auth.token = value
+
+    def authorization_url(self) -> tuple[str, str]:
+        """
+        Generate an authorization URL.
+
+        Returns
+        -------
+        tuple[str, str]
+            (authorization_url, state)
+        """
+
+        return self.auth.build_authorization_url()
 
     def exchange_code(self, code: str):
+        """
+        Exchange an authorization code for tokens.
+        """
+
         return self.auth.exchange_code(code)
 
     def refresh(self):
+        """
+        Refresh the current access token.
+        """
+
         return self.auth.refresh()
 
     def logout(self) -> None:
+        """
+        Clear the current authentication.
+        """
+
         self.auth.logout()

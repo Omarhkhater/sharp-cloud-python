@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import secrets
-import webbrowser
 from urllib.parse import urlencode
 
 import requests
@@ -24,12 +23,17 @@ from ..constants import (
 class OAuthClient:
     """Handles Azure AD B2C authentication."""
 
-    def __init__(self, config: SharpConfig):
+    def __init__(
+        self,
+        config: SharpConfig,
+    ):
         self._config = config
         self.token: OAuthToken | None = None
 
     @property
     def authenticated(self) -> bool:
+        """Return True if authenticated."""
+
         if self.token is None:
             return False
 
@@ -43,14 +47,20 @@ class OAuthClient:
 
     @property
     def client_id(self) -> str:
+        """Return the Azure client id."""
+
         return CLIENT_ID
 
     @property
     def client_secret(self) -> str:
+        """Return the Azure client secret."""
+
         return CLIENT_SECRET
 
     @property
     def access_token(self) -> str:
+        """Return the current access token."""
+
         if not self.authenticated:
             raise RuntimeError("Not authenticated.")
 
@@ -58,6 +68,8 @@ class OAuthClient:
 
     @property
     def refresh_token(self) -> str:
+        """Return the current refresh token."""
+
         if self.token is None:
             raise RuntimeError("Not authenticated.")
 
@@ -65,6 +77,8 @@ class OAuthClient:
 
     @property
     def id_token(self) -> str:
+        """Return the current id token."""
+
         if self.token is None:
             raise RuntimeError("Not authenticated.")
 
@@ -72,9 +86,22 @@ class OAuthClient:
 
     @staticmethod
     def generate_state() -> str:
+        """Generate a random OAuth state."""
+
         return secrets.token_urlsafe(32)
 
-    def build_authorization_url(self) -> tuple[str, str]:
+    def build_authorization_url(
+        self,
+    ) -> tuple[str, str]:
+        """
+        Build the Sharp OAuth authorization URL.
+
+        Returns
+        -------
+        tuple[str, str]
+            (authorization_url, state)
+        """
+
         state = self.generate_state()
 
         params = {
@@ -91,12 +118,12 @@ class OAuthClient:
             state,
         )
 
-    def open_browser(self) -> str:
-        url, state = self.build_authorization_url()
-        webbrowser.open(url)
-        return state
+    def exchange_code(
+        self,
+        code: str,
+    ) -> OAuthToken:
+        """Exchange an authorization code for OAuth tokens."""
 
-    def exchange_code(self, code: str) -> OAuthToken:
         response = requests.post(
             B2C_TOKEN_URL,
             data={
@@ -112,11 +139,17 @@ class OAuthClient:
 
         response.raise_for_status()
 
-        self.token = OAuthToken.from_dict(response.json())
+        self.token = OAuthToken.from_dict(
+            response.json(),
+        )
 
         return self.token
 
-    def refresh(self) -> OAuthToken:
+    def refresh(
+        self,
+    ) -> OAuthToken:
+        """Refresh the OAuth token."""
+
         if self.token is None:
             raise RuntimeError("Not authenticated.")
 
@@ -135,9 +168,15 @@ class OAuthClient:
 
         response.raise_for_status()
 
-        self.token = OAuthToken.from_dict(response.json())
+        self.token = OAuthToken.from_dict(
+            response.json(),
+        )
 
         return self.token
 
-    def logout(self) -> None:
+    def logout(
+        self,
+    ) -> None:
+        """Clear the current authentication."""
+
         self.token = None
