@@ -7,21 +7,12 @@
   "codeowners": [
     "@Omarhkhater"
   ],
-  "requirements": [
-    "git+https://github.com/Omarhkhater/sharp-cloud-python.git@v0.1.0"
-  ],
+  "requirements": [],
   "config_flow": true,
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "quality_scale": "silver",
   "loggers": [
-    "sharp_cloud"
-  ],
-  "dependencies": [],
-  "after_dependencies": [],
-  "homekit": {},
-  "zeroconf": [],
-  "ssdp": [],
-  "bluetooth": [],
-  "dhcp": []
+    "custom_components.sharp_cocoro_air"
+  ]
 }
