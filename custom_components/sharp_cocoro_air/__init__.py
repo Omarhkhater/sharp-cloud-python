@@ -6,8 +6,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from sharp_cloud import SharpCloud
-from sharp_cloud.auth.token import OAuthToken
+from .sharp_cloud import SharpCloud
+from .sharp_cloud.auth.token import OAuthToken
 
 from .const import DOMAIN
 from .coordinator import SharpCoordinator
