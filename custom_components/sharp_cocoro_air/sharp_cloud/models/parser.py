@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from sharp_cloud.models.control import DeviceCommand
-from sharp_cloud.models.device import Device, Terminal
-from sharp_cloud.models.property import DeviceProperty
-from sharp_cloud.models.result import ControlResult
-from sharp_cloud.models.status import DeviceStatus
+from .control import DeviceCommand
+from .device import Device, Terminal
+from .property import DeviceProperty
+from .result import ControlResult
+from .status import DeviceStatus
 
 
 class Parser:

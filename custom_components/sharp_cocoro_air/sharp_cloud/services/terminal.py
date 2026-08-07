@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from sharp_cloud.api.endpoints import Endpoints
-from sharp_cloud.api.http import HttpClient
-from sharp_cloud.models import Parser, Terminal
+from ..api.endpoints import Endpoints
+from ..api.http import HttpClient
+from ..models import Parser, Terminal
 
 
 class TerminalService:

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from sharp_cloud.auth.oauth import OAuthClient
-from sharp_cloud.config import SharpConfig
-from sharp_cloud.http import HttpClient
-from sharp_cloud.services import (
+from .auth.oauth import OAuthClient
+from .config import SharpConfig
+from .http import HttpClient
+from .services import (
     AuthenticationService,
     DeviceService,
 )

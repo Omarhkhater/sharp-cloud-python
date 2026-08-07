@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sharp_cloud.constants import (
+from ..constants import (
     API_BASE_URL,
     Endpoint,
 )

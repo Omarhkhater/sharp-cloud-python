@@ -8,9 +8,9 @@ from urllib.parse import urlencode
 
 import requests
 
-from sharp_cloud.auth.token import OAuthToken
-from sharp_cloud.config import SharpConfig
-from sharp_cloud.constants import (
+from .token import OAuthToken
+from ..config import SharpConfig
+from ..constants import (
     B2C_AUTHORIZE_URL,
     B2C_TOKEN_URL,
     CLIENT_ID,

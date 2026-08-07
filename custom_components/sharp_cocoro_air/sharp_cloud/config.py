@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sharp_cloud.constants import (
+from .constants import (
     API_BASE_URL,
     API_HOST,
     CLIENT_ID,

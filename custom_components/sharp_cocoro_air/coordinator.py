@@ -11,7 +11,7 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from sharp_cloud import SharpCloud
+from .sharp_cloud import SharpCloud
 
 from .const import (
     DEFAULT_REFRESH_INTERVAL,
@@ -54,20 +54,30 @@ class SharpCoordinator(DataUpdateCoordinator):
             devices = pairing.get("data", [])
 
             for device in devices:
-                status = await self.hass.async_add_executor_job(
-                    self.client.devices.status,
-                    device["terminalAppId"],
-                )
+                terminal_app_id = device.get("terminalAppId")
 
                 properties = await self.hass.async_add_executor_job(
                     self.client.devices.properties,
-                    device["terminalAppId"],
+                    terminal_app_id,
                 )
 
-                device["status"] = status
-                device["properties"] = properties
+                status = await self.hass.async_add_executor_job(
+                    self.client.devices.status,
+                    terminal_app_id,
+                )
+
+                device["properties"] = properties.get(
+                    "data",
+                    properties,
+                )
+
+                device["status"] = status.get(
+                    "data",
+                    status,
+                )
 
             return devices
 
         except Exception as err:
+            _LOGGER.exception(err)
             raise UpdateFailed(str(err)) from err

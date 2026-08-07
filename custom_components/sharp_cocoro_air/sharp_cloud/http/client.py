@@ -6,8 +6,8 @@ from typing import Any
 
 import requests
 
-from sharp_cloud.config import SharpConfig
-from sharp_cloud.exceptions import AuthenticationError
+from ..config import SharpConfig
+from ..exceptions import AuthenticationError
 
 
 class HttpClient:

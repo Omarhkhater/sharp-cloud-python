@@ -7,7 +7,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 
-from sharp_cloud import SharpCloud
+from .sharp_cloud import SharpCloud
 
 from .const import (
     CONF_PASSWORD,

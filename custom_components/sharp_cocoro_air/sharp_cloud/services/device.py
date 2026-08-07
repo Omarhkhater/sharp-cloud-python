@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from sharp_cloud.http import HttpClient
-from sharp_cloud.protocol import Endpoints
+from ..http import HttpClient
+from ..protocol import Endpoints
 
 
 class DeviceService:

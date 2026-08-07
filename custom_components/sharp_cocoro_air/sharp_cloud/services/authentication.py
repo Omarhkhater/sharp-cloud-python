@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from sharp_cloud.auth.oauth import OAuthClient
-from sharp_cloud.http import HttpClient
-from sharp_cloud.protocol import Endpoints
+from ..auth.oauth import OAuthClient
+from ..http import HttpClient
+from ..protocol import Endpoints
 
 
 class AuthenticationService:
