@@ -2,21 +2,26 @@
   "domain": "sharp_cocoro_air",
   "name": "Sharp COCORO AIR",
   "version": "0.1.0",
-  "documentation": "https://github.com/okhater/sharp-cloud-python",
-  "issue_tracker": "https://github.com/okhater/sharp-cloud-python/issues",
+  "documentation": "https://github.com/Omarhkhater/sharp-cloud-python",
+  "issue_tracker": "https://github.com/Omarhkhater/sharp-cloud-python/issues",
   "codeowners": [
-    "@okhater"
+    "@Omarhkhater"
   ],
   "requirements": [
-    "sharp-cloud-python"
+    "git+https://github.com/Omarhkhater/sharp-cloud-python.git@v0.1.0"
   ],
   "config_flow": true,
   "integration_type": "hub",
   "iot_class": "cloud_polling",
+  "quality_scale": "silver",
   "loggers": [
     "sharp_cloud"
   ],
   "dependencies": [],
   "after_dependencies": [],
-  "quality_scale": "silver"
+  "homekit": {},
+  "zeroconf": [],
+  "ssdp": [],
+  "bluetooth": [],
+  "dhcp": []
 }
