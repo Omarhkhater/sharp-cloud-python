@@ -97,7 +97,7 @@ In the SHARP Air Control app, open the list of signed-in terminals or smartphone
 
 ## If Home Assistant asks you to sign in again
 
-A 401 first retries login with the stored terminal id and cookies. If that fails, Home Assistant starts a re-authentication flow. Repeat the browser sign-in and paste the new address. The same terminal is kept, so the air conditioners stay paired.
+A 401 retries login with the stored terminal id. The previous session cookies are dropped first, so a stale cookie cannot hide the new one. If that terminal id is refused, Home Assistant asks you to sign in again immediately. Any other sign-in failure is tried again on the next polls, and Home Assistant asks you to sign in again after three failures in a row. Repeat the browser sign-in and paste the new address. The same terminal is kept, so the air conditioners stay paired. There is no B2C refresh token; the Egypt cloud only renews the session from the terminal id.
 
 ## What to try first
 

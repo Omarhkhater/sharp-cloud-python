@@ -89,6 +89,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         self._last_outdoor: dict[str, tuple[float, float]] = {}
         self._refresh_unsub = None
         self._closed = False
+        self._auth_failures = 0
         self.tracked_options = dict(entry.options)
         entry.async_on_unload(self._on_unload)
 
@@ -108,9 +109,15 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             try:
                 payload = await self.client.box_info()
             except SharpAuthError as err:
-                raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
+                self._auth_failures += 1
+                # A refused terminal id will not recover on the next poll.
+                # Any other rejection is given two polls before reauth.
+                if str(err) == "terminal login refused" or self._auth_failures >= 3:
+                    raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
+                raise UpdateFailed("Sharp sign-in expired") from err
             except SharpError as err:
                 raise UpdateFailed("Could not reach the Sharp cloud") from err
+            self._auth_failures = 0
             # One attempt per box per entry load, then at most once an hour.
             await self.client.pair_unlisted(payload)
             _box_ids, devices = split_box_info(payload)
@@ -120,18 +127,20 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             self._overlay_pending(data)
             return data
 
-    def note_outdoor(self, key: str, value: float, updated_at: datetime | None = None) -> None:
+    def note_outdoor(self, key: str, value: float, updated_at: datetime | None = None) -> bool:
         """Remember a restored outdoor reading so a later off poll can hold it.
 
-        ``updated_at`` is the restored state's last update. The hold is measured
-        from that moment, so a reading that was already old does not start over
-        at this restart.
+        ``updated_at`` is the restored state's last report, or its last update
+        when that is missing. A reading that is already 6 hours old is not seeded.
         """
         seen = _monotonic()
         if updated_at is not None:
             age = (dt_util.utcnow() - dt_util.as_utc(updated_at)).total_seconds()
+            if age >= OUTDOOR_HOLD_S:
+                return False
             seen -= max(age, 0.0)
         self._last_outdoor.setdefault(key, (value, seen))
+        return True
 
     def _hold_outdoor(self, devices: list[Aircon]) -> list[Aircon]:
         """Keep the last outdoor temperature while the unit is off.

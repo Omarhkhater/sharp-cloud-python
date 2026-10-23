@@ -15,6 +15,7 @@ import string
 import time
 import urllib.parse
 from dataclasses import dataclass
+from http.cookies import SimpleCookie
 
 import aiohttp
 from homeassistant.core import HomeAssistant
@@ -145,31 +146,61 @@ class SharpClient:
             self._session.detach()
 
     def restore_cookies(self, cookies: list[dict]) -> None:
-        """Load persisted cookies into the jar."""
-        mapping = {
-            cookie["name"]: cookie["value"]
-            for cookie in cookies
-            if cookie.get("name") and cookie.get("value") is not None
-        }
-        if mapping:
-            self._session.cookie_jar.update_cookies(mapping, response_url=URL(self._base_url))
+        """Load persisted cookies on the path and domain they were saved with.
+
+        A name-only mapping would park JSESSIONID on ``/hems/pfApi/ta``. The
+        cloud often sets the new session on ``/`` or ``/hems``, and aiohttp
+        then keeps sending the more specific stale cookie.
+        """
+        jar: SimpleCookie = SimpleCookie()
+        for cookie in cookies:
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if not name or value is None:
+                continue
+            jar[name] = str(value)
+            morsel = jar[name]
+            morsel["path"] = cookie.get("path") or "/"
+            domain = cookie.get("domain")
+            if domain:
+                morsel["domain"] = domain
+        if jar:
+            self._session.cookie_jar.update_cookies(jar, response_url=URL(self._base_url))
 
     def export_cookies(self) -> list[dict[str, str]]:
-        """Cookies the next request to HMS would send."""
+        """One cookie per name, on the path the server actually set."""
         url = URL(self._base_url)
-        filtered = self._session.cookie_jar.filter_cookies(url)
         host = url.host or ""
-        exported = [
+        # Later entries win. A Set-Cookie during this session replaces a restored one.
+        chosen = {}
+        for morsel in self._session.cookie_jar:
+            chosen[morsel.key] = morsel
+        return [
             {
                 "name": name,
-                "value": morsel.value,
-                "domain": morsel["domain"] or host,
-                "path": morsel["path"] or "/",
+                "value": chosen[name].value,
+                "domain": chosen[name]["domain"] or host,
+                "path": chosen[name]["path"] or "/",
             }
-            for name, morsel in filtered.items()
+            for name in sorted(chosen)
         ]
-        exported.sort(key=lambda item: item["name"])
-        return exported
+
+    def _drop_session(self) -> None:
+        """Drop JSESSIONID and the load-balancer cookies before a login.
+
+        Entries saved before the path was kept still hold a stale session on
+        the API prefix. Clearing it lets the next Set-Cookie stand alone.
+        """
+        self._session.cookie_jar.clear(
+            lambda morsel: morsel.key == "JSESSIONID" or morsel.key.startswith("AWSALB")
+        )
+
+    def _debug_http(self, status: int) -> None:
+        """Log the status and cookie names and paths. Values stay out of the log."""
+        cookies = ",".join(
+            f"{morsel.key}:{morsel['path'] or '/'}" for morsel in self._session.cookie_jar
+        )
+        _LOGGER.debug("status=%s cookies=%s", status, cookies)
 
     async def _request(
         self,
@@ -197,16 +228,30 @@ class SharpClient:
         except (aiohttp.ClientError, TimeoutError, OSError):
             raise SharpConnectionError("Could not reach the Sharp cloud") from None
 
+        self._debug_http(status)
         if status == 401 and allow_reauth and self.terminal_app_id and path != "setting/login/":
             await self.login_with_terminal()
-            return await self._request(
-                method,
-                path,
-                params=params,
-                json_body=json_body,
-                allow_reauth=False,
-                ok=ok,
-            )
+            try:
+                return await self._request(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    allow_reauth=False,
+                    ok=ok,
+                )
+            except SharpAuthError:
+                # The re-login returned 200 and the retry was still rejected.
+                self._drop_session()
+                await self.login_with_terminal()
+                return await self._request(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    allow_reauth=False,
+                    ok=ok,
+                )
         if status == 401:
             raise SharpAuthError("Sharp sign-in expired")
         if status not in ok:
@@ -229,6 +274,7 @@ class SharpClient:
 
     async def login_with_code(self, code: str, nonce: str | None = None) -> None:
         """Exchange a B2C code. There is no call to the B2C token endpoint."""
+        self._drop_session()
         if not self.terminal_app_id:
             raise SharpAuthError("Sharp sign-in expired")
         await self._request(
@@ -254,15 +300,19 @@ class SharpClient:
 
     async def _login_with_terminal(self) -> None:
         """Post the terminal id. Caller holds the single-flight task, not the lock."""
+        self._drop_session()
         if not self.terminal_app_id:
             raise SharpAuthError("Sharp sign-in expired")
-        await self._request(
-            "POST",
-            "setting/login/",
-            params={"serviceName": SERVICE_NAME},
-            json_body={"terminalAppId": self.terminal_app_id},
-            allow_reauth=False,
-        )
+        try:
+            await self._request(
+                "POST",
+                "setting/login/",
+                params={"serviceName": SERVICE_NAME},
+                json_body={"terminalAppId": self.terminal_app_id},
+                allow_reauth=False,
+            )
+        except SharpAuthError:
+            raise SharpAuthError("terminal login refused") from None
 
     async def register_terminal(self, name: str = "Home Assistant") -> None:
         """Register this terminal so later logins can use the terminal id alone."""

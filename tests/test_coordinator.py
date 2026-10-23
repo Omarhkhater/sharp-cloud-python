@@ -6,14 +6,20 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.event import async_call_later as real_call_later
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed,
 )
 
+from custom_components.sharp_cocoro_air.client import (
+    SharpAPIError,
+    SharpAuthError,
+    SharpConnectionError,
+)
 from custom_components.sharp_cocoro_air.const import DOMAIN
 from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
 from custom_components.sharp_cocoro_air.protocol import Aircon
@@ -135,3 +141,89 @@ async def test_status_refresh_does_not_resend_the_command(hass):
         assert cloud.sent == [_STATUS]
     finally:
         await coordinator.async_shutdown()
+
+
+class _AuthCloud:
+    """boxInfo that fails until ``exc`` is cleared."""
+
+    def __init__(self, exc: Exception | None) -> None:
+        self.exc = exc
+
+    async def box_info(self) -> dict:
+        if self.exc is not None:
+            raise self.exc
+        return {"devices": []}
+
+    async def pair_unlisted(self, payload: dict) -> None:
+        return None
+
+    def export_cookies(self) -> list[dict]:
+        return []
+
+
+def _auth_coordinator(hass, cloud: _AuthCloud) -> SharpCoordinator:
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    return SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+
+
+async def test_one_rejected_session_is_update_failed_and_the_third_reauths(hass):
+    """The first two sign-in failures stay unavailable. The third starts reauth."""
+    cloud = _AuthCloud(SharpAuthError("Sharp sign-in expired"))
+    coordinator = _auth_coordinator(hass, cloud)
+    try:
+        for _attempt in range(2):
+            with pytest.raises(UpdateFailed):
+                await coordinator._async_update_data()
+        assert coordinator._auth_failures == 2
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coordinator._async_update_data()
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_successful_poll_resets_the_auth_failure_count(hass):
+    """A good poll clears the streak, so two later failures do not reauth."""
+    cloud = _AuthCloud(SharpAuthError("Sharp sign-in expired"))
+    coordinator = _auth_coordinator(hass, cloud)
+    try:
+        with pytest.raises(UpdateFailed):
+            await coordinator._async_update_data()
+        cloud.exc = None
+        await coordinator._async_update_data()
+        assert coordinator._auth_failures == 0
+        cloud.exc = SharpAuthError("Sharp sign-in expired")
+        for _attempt in range(2):
+            with pytest.raises(UpdateFailed):
+                await coordinator._async_update_data()
+        assert coordinator._auth_failures == 2
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_refused_terminal_login_reauths_immediately(hass):
+    """A refused terminal id does not wait for three polls."""
+    cloud = _AuthCloud(SharpAuthError("terminal login refused"))
+    coordinator = _auth_coordinator(hass, cloud)
+    try:
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coordinator._async_update_data()
+        assert coordinator._auth_failures == 1
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_relogin_outage_is_update_failed_and_does_not_count(hass):
+    """A 500 or a timeout while refreshing the session is not a reauth."""
+    for exc in (
+        SharpConnectionError("Could not reach the Sharp cloud"),
+        SharpAPIError(503),
+    ):
+        cloud = _AuthCloud(exc)
+        coordinator = _auth_coordinator(hass, cloud)
+        try:
+            with pytest.raises(UpdateFailed):
+                await coordinator._async_update_data()
+            assert coordinator._auth_failures == 0
+        finally:
+            await coordinator.async_shutdown()

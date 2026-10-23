@@ -190,7 +190,7 @@ class SharpOutdoorSensor(SharpSensor, RestoreSensor):
             self._restored = float(last.native_value)
         state = await self.async_get_last_state()
         if state is not None:
-            self._restored_at = state.last_updated
+            self._restored_at = state.last_reported or state.last_updated
         self._accept_restore()
 
     def _handle_coordinator_update(self) -> None:
@@ -213,9 +213,12 @@ class SharpOutdoorSensor(SharpSensor, RestoreSensor):
         if device is None:
             return
         self._decided = True
-        if device.outdoor_temp is None and device.power is False:
+        if (
+            device.outdoor_temp is None
+            and device.power is False
+            and self.coordinator.note_outdoor(self._key, self._restored, self._restored_at)
+        ):
             self._use_restore = True
-            self.coordinator.note_outdoor(self._key, self._restored, self._restored_at)
             return
         self._restored = None
 

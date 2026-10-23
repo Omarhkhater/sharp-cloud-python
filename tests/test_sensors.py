@@ -235,10 +235,20 @@ def _off_device() -> Aircon:
 
 
 async def _restored_sensor(
-    hass, coordinator: SharpCoordinator, *, age: float
+    hass,
+    coordinator: SharpCoordinator,
+    *,
+    age: float,
+    reported_age: float | None = None,
 ) -> SharpOutdoorSensor:
-    """An outdoor sensor whose saved state is ``age`` seconds old."""
+    """An outdoor sensor whose saved state is ``age`` seconds old.
+
+    ``reported_age`` overrides last_reported. The default uses the same instant
+    as last_updated, because a State fills last_reported with "now" otherwise.
+    """
     entity_id = "sensor.living_room_outdoor_temperature"
+    updated = dt_util.utcnow() - timedelta(seconds=age)
+    reported = dt_util.utcnow() - timedelta(seconds=age if reported_age is None else reported_age)
     mock_restore_cache_with_extra_data(
         hass,
         [
@@ -247,7 +257,8 @@ async def _restored_sensor(
                     entity_id,
                     "26",
                     {"unit_of_measurement": UnitOfTemperature.CELSIUS},
-                    last_updated=dt_util.utcnow() - timedelta(seconds=age),
+                    last_updated=updated,
+                    last_reported=reported,
                 ),
                 {"native_value": 26, "native_unit_of_measurement": UnitOfTemperature.CELSIUS},
             )
@@ -286,18 +297,21 @@ async def test_restored_outdoor_expires_after_the_hold(hass, monkeypatch):
         await coordinator.async_shutdown()
 
 
-async def test_restored_outdoor_age_comes_from_last_updated(hass, monkeypatch):
-    """A reading that was already 6 hours old before restart is not held again."""
+async def test_restored_outdoor_at_least_six_hours_old_is_not_seeded(hass, monkeypatch):
+    """A reading that is already 6 hours old is not held again after restart."""
     clock = _Clock()
     monkeypatch.setattr(coordinator_mod, "_monotonic", clock.monotonic)
+    frozen = dt_util.utcnow()
+    monkeypatch.setattr(coordinator_mod.dt_util, "utcnow", lambda: frozen)
     device = _off_device()
     cloud = _Cloud(_payload(power=0x31, outdoor=0x7E))
     coordinator = _coordinator(hass, cloud)
     coordinator.data = {device.unique_key: device}
-    sensor = await _restored_sensor(hass, coordinator, age=OUTDOOR_HOLD_S + 60)
+    sensor = await _restored_sensor(hass, coordinator, age=OUTDOOR_HOLD_S)
     try:
-        seen = coordinator._last_outdoor[device.unique_key][1]
-        assert clock.now - seen > OUTDOOR_HOLD_S
+        assert device.unique_key not in coordinator._last_outdoor
+        assert sensor._use_restore is False
+        assert sensor.native_value is None
 
         data = await coordinator._async_update_data()
         assert data[device.unique_key].outdoor_temp is None
@@ -306,4 +320,33 @@ async def test_restored_outdoor_age_comes_from_last_updated(hass, monkeypatch):
         assert "stale" not in sensor.extra_state_attributes
     finally:
         await sensor.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_restored_outdoor_is_dated_from_last_reported(hass, monkeypatch):
+    """last_reported dates the reading. last_updated is only the fallback."""
+    clock = _Clock()
+    monkeypatch.setattr(coordinator_mod, "_monotonic", clock.monotonic)
+    device = _off_device()
+    cloud = _Cloud(_payload(power=0x31, outdoor=0x7E))
+    coordinator = _coordinator(hass, cloud)
+    coordinator.data = {device.unique_key: device}
+    stale_report = await _restored_sensor(
+        hass, coordinator, age=0, reported_age=OUTDOOR_HOLD_S + 60
+    )
+    try:
+        assert device.unique_key not in coordinator._last_outdoor
+        assert stale_report.native_value is None
+    finally:
+        await stale_report.async_remove()
+
+    fresh_report = await _restored_sensor(
+        hass, coordinator, age=OUTDOOR_HOLD_S + 60, reported_age=0
+    )
+    try:
+        assert coordinator._last_outdoor[device.unique_key][0] == 26
+        assert fresh_report.native_value == 26
+        assert fresh_report.extra_state_attributes["stale"] is True
+    finally:
+        await fresh_report.async_remove()
         await coordinator.async_shutdown()

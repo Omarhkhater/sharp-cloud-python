@@ -103,8 +103,9 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _async_reauth(self, client: SharpClient, code: str) -> FlowResult:
         """Sign in again on the terminal this entry already registered."""
         entry = self._get_reauth_entry()
+        # Fresh jar plus the stored terminal id and the new code. Saved cookies
+        # can sit on the wrong path and would be sent ahead of the new session.
         client.terminal_app_id = entry.data.get(CONF_TERMINAL_APP_ID)
-        client.restore_cookies(entry.data.get(CONF_COOKIES) or [])
         user_id = await client.refresh_with_code(code)
         await self.async_set_unique_id(user_id)
         self._abort_if_unique_id_mismatch()

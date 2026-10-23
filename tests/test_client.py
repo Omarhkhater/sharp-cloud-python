@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
 import pytest_socket
 from aiohttp import web
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.sharp_cocoro_air import _async_reload_options
+from custom_components.sharp_cocoro_air import client as client_mod
 from custom_components.sharp_cocoro_air.client import (
     SharpAPIError,
     SharpAuthError,
@@ -18,7 +23,14 @@ from custom_components.sharp_cocoro_air.client import (
     SharpError,
     app_nonce,
 )
-from custom_components.sharp_cocoro_air.const import APP_NAME, APP_SECRET
+from custom_components.sharp_cocoro_air.const import (
+    APP_NAME,
+    APP_SECRET,
+    CONF_COOKIES,
+    CONF_TERMINAL_APP_ID,
+    DOMAIN,
+)
+from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
 from custom_components.sharp_cocoro_air.protocol import Aircon, cmd_setpoint
 
 
@@ -429,6 +441,234 @@ async def test_empty_control_is_rejected_before_the_cloud():
             await client.send_control(device, [])
     finally:
         await client.aclose()
+
+
+async def test_restore_keeps_the_saved_path_and_domain():
+    """A saved cookie is not moved onto the API prefix."""
+    client = SharpClient(
+        _session(),
+        base_url="https://eg-hms.cloudlabs.sharp.co.jp/hems/pfApi/ta/",
+    )
+    try:
+        client.restore_cookies(
+            [
+                {
+                    "name": "JSESSIONID",
+                    "value": "kept-session",
+                    "domain": "eg-hms.cloudlabs.sharp.co.jp",
+                    "path": "/hems",
+                },
+                {
+                    "name": "AWSALB",
+                    "value": "kept-lb",
+                    "domain": "eg-hms.cloudlabs.sharp.co.jp",
+                    "path": "/",
+                },
+            ]
+        )
+        assert client.export_cookies() == [
+            {
+                "name": "AWSALB",
+                "value": "kept-lb",
+                "domain": "eg-hms.cloudlabs.sharp.co.jp",
+                "path": "/",
+            },
+            {
+                "name": "JSESSIONID",
+                "value": "kept-session",
+                "domain": "eg-hms.cloudlabs.sharp.co.jp",
+                "path": "/hems",
+            },
+        ]
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("server_path", ["/", "/hems", "/hems/pfApi/ta"])
+async def test_expired_cookie_is_replaced_after_one_login(hass, server_path, caplog):
+    """A stale session on the API path does not survive the terminal re-login.
+
+    The new JSESSIONID is stored with the path the server set, and the config
+    entry is updated without reloading.
+    """
+    pytest_socket.enable_socket()
+    caplog.set_level("DEBUG", logger="custom_components.sharp_cocoro_air.client")
+    logins: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.path.endswith("/setting/login/"):
+            logins.append(request.headers.get("Cookie", ""))
+            response = web.json_response({})
+            response.set_cookie("JSESSIONID", "fresh-session", path=server_path)
+            response.set_cookie("AWSALB", "fresh-lb", path=server_path)
+            return response
+        if request.path.endswith("/setting/boxInfo"):
+            if request.cookies.get("JSESSIONID") != "fresh-session":
+                return web.Response(status=401, text="")
+            return web.json_response({"devices": []})
+        return web.Response(status=500, text="")
+
+    runner, base = await _serve(handle)
+    session = _session()
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_TERMINAL_APP_ID: "https://example.invalid/terminal/1",
+            CONF_COOKIES: [
+                {
+                    "name": "JSESSIONID",
+                    "value": "expired-session",
+                    "domain": "127.0.0.1",
+                    "path": "/hems/pfApi/ta",
+                }
+            ],
+        },
+    )
+    entry.add_to_hass(hass)
+    client = SharpClient(session, entry.data[CONF_TERMINAL_APP_ID], base_url=base)
+    client.restore_cookies(entry.data[CONF_COOKIES])
+    coordinator = SharpCoordinator(hass, entry, client)
+    entry.runtime_data = coordinator
+    entry.add_update_listener(_async_reload_options)
+    try:
+        with patch.object(hass.config_entries, "async_reload", new=AsyncMock()) as reload:
+            await coordinator._async_update_data()
+            await hass.async_block_till_done()
+        reload.assert_not_called()
+    finally:
+        await coordinator.async_shutdown()
+        await client.aclose()
+        await runner.cleanup()
+
+    assert logins == [""]
+    saved = next(cookie for cookie in entry.data[CONF_COOKIES] if cookie["name"] == "JSESSIONID")
+    assert saved["value"] == "fresh-session"
+    assert saved["path"] == server_path
+    assert saved["domain"] == "127.0.0.1"
+    logged = " ".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "custom_components.sharp_cocoro_air.client"
+    )
+    assert "expired-session" not in logged
+    assert "fresh-session" not in logged
+    assert "fresh-lb" not in logged
+    assert "status=401" in logged
+    assert "status=200" in logged
+    assert f"JSESSIONID:{server_path}" in logged
+
+
+async def test_retry_still_unauthorized_logs_in_once_more():
+    """A 401 after a successful re-login drops the session and tries once more."""
+    pytest_socket.enable_socket()
+    logins = 0
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        nonlocal logins
+        if request.path.endswith("/setting/login/"):
+            logins += 1
+            response = web.json_response({})
+            response.set_cookie("JSESSIONID", "fresh-session", path="/")
+            return response
+        return web.Response(status=401, text="")
+
+    runner, base = await _serve(handle)
+    client = await _client(base, "https://example.invalid/terminal/1")
+    try:
+        with pytest.raises(SharpAuthError, match="Sharp sign-in expired") as caught:
+            await client.box_info()
+        assert str(caught.value) != "terminal login refused"
+        assert logins == 2
+    finally:
+        await client.aclose()
+        await runner.cleanup()
+
+
+async def test_refused_terminal_login_is_not_retried():
+    """A 401 from the terminal re-login itself is terminal login refused."""
+    pytest_socket.enable_socket()
+    logins = 0
+    box_hits = 0
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        nonlocal logins, box_hits
+        if request.path.endswith("/setting/login/"):
+            logins += 1
+            return web.Response(status=401, text="")
+        box_hits += 1
+        return web.Response(status=401, text="")
+
+    runner, base = await _serve(handle)
+    client = await _client(base, "https://example.invalid/terminal/1")
+    try:
+        with pytest.raises(SharpAuthError, match="terminal login refused"):
+            await client.box_info()
+        assert logins == 1
+        assert box_hits == 1
+    finally:
+        await client.aclose()
+        await runner.cleanup()
+
+
+async def test_relogin_http_error_is_not_an_auth_failure():
+    """A 500 from the terminal re-login is an API error, not a refused login."""
+    pytest_socket.enable_socket()
+    logins = 0
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        nonlocal logins
+        if request.path.endswith("/setting/login/"):
+            logins += 1
+            return web.Response(status=500, text="")
+        return web.Response(status=401, text="")
+
+    runner, base = await _serve(handle)
+    client = await _client(base, "https://example.invalid/terminal/1")
+    try:
+        with pytest.raises(SharpAPIError) as caught:
+            await client.box_info()
+        assert caught.value.status == 500
+        assert logins == 1
+    finally:
+        await client.aclose()
+        await runner.cleanup()
+
+
+async def test_relogin_timeout_is_a_connection_error(monkeypatch):
+    """A terminal re-login that never answers is a connection error."""
+    pytest_socket.enable_socket()
+    real_timeout = client_mod.aiohttp.ClientTimeout
+
+    def fast_timeout(**kwargs):
+        return real_timeout(total=0.2)
+
+    monkeypatch.setattr(client_mod.aiohttp, "ClientTimeout", fast_timeout)
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.path.endswith("/setting/login/"):
+            await asyncio.sleep(2)
+            return web.json_response({})
+        return web.Response(status=401, text="")
+
+    runner, base = await _serve(handle)
+    client = await _client(base, "https://example.invalid/terminal/1")
+    try:
+        with pytest.raises(SharpConnectionError):
+            await client.box_info()
+    finally:
+        await client.aclose()
+        await runner.cleanup()
+
+
+async def _serve(handle) -> tuple[web.AppRunner, str]:
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    return runner, f"http://127.0.0.1:{port}/hems/pfApi/ta/"
 
 
 def test_nonce_is_32_alnum():

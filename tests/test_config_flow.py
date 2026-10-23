@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest_socket
+from aiohttp import web
 from homeassistant.config_entries import SOURCE_REAUTH
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.sharp_cocoro_air.client import Account, SharpAuthError, SharpConnectionError
-from custom_components.sharp_cocoro_air.const import DOMAIN
+from custom_components.sharp_cocoro_air.client import (
+    Account,
+    SharpAuthError,
+    SharpClient,
+    SharpConnectionError,
+)
+from custom_components.sharp_cocoro_air.const import DOMAIN, HMS_API
 
 ACCOUNT = Account(
     user_id="user-1",
@@ -271,3 +278,99 @@ async def test_options_flow_defaults_experimental_controls_off(hass):
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["experimental_controls"] is True
+
+
+async def test_reauth_succeeds_without_restoring_stale_cookies(hass):
+    """Reauth uses a fresh jar. A saved session on the wrong path is not sent."""
+    pytest_socket.enable_socket()
+    login_cookies: list[str] = []
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.path.endswith("/setting/login/"):
+            cookie = request.headers.get("Cookie", "")
+            login_cookies.append(cookie)
+            if "expired-session" in cookie:
+                return web.Response(status=401, text="")
+            response = web.json_response({})
+            response.set_cookie("JSESSIONID", "fresh-session", path="/")
+            return response
+        if request.path.endswith("/setting/userInfo"):
+            return web.json_response({"userId": "user-1"})
+        if request.path.endswith("/setting/boxInfo"):
+            return web.json_response({"devices": []})
+        return web.Response(status=500, text="")
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    base = f"http://127.0.0.1:{port}/hems/pfApi/ta/"
+
+    class Bound(SharpClient):
+        """The flow's client, pointed at the fake cloud."""
+
+        def __init__(self, session, terminal_app_id=None, *, base_url: str = HMS_API) -> None:
+            super().__init__(session, terminal_app_id, base_url=base)
+
+    restored: list[list[dict]] = []
+    original = SharpClient.restore_cookies
+
+    def spy(self, cookies):
+        restored.append(list(cookies))
+        return original(self, cookies)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user-1",
+        data={
+            "terminal_app_id": "https://example.invalid/terminal/1",
+            "user_id": "user-1",
+            "cookies": [
+                {
+                    "name": "JSESSIONID",
+                    "value": "expired-session",
+                    "domain": "127.0.0.1",
+                    "path": "/hems/pfApi/ta",
+                }
+            ],
+        },
+    )
+    entry.add_to_hass(hass)
+    try:
+        with (
+            patch("custom_components.sharp_cocoro_air.config_flow.SharpClient", Bound),
+            patch.object(SharpClient, "restore_cookies", spy),
+            patch(
+                "custom_components.sharp_cocoro_air.client.SharpClient.box_info",
+                new=AsyncMock(return_value={"devices": []}),
+            ),
+        ):
+            result = await hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={
+                    "source": SOURCE_REAUTH,
+                    "entry_id": entry.entry_id,
+                    "unique_id": entry.unique_id,
+                },
+                data=dict(entry.data),
+            )
+            assert result["type"] is FlowResultType.FORM
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                {"redirect_url": "https://sharp-cocoroair-egypt/?code=fresh"},
+            )
+            await hass.async_block_till_done()
+    finally:
+        await runner.cleanup()
+
+    assert all(cookie.get("value") != "expired-session" for call in restored for cookie in call)
+    assert login_cookies == [""]
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    saved = next(cookie for cookie in entry.data["cookies"] if cookie["name"] == "JSESSIONID")
+    assert saved["value"] == "fresh-session"
+    assert saved["path"] == "/"
+    assert entry.data["terminal_app_id"] == "https://example.invalid/terminal/1"
