@@ -63,7 +63,7 @@ Confirmed live on the Living Room AY-XP12YHE: browser sign-in, terminal pairing,
 
 Fan Rapid (`A0` = `38`) was rejected. `controlResult` came back `unmatch`, and the unit briefly reported `37` (Strong). Rapid is hidden unless experimental controls are on, and the label says it may be unsupported. Do not expect it to stick.
 
-Super Jet is read from FA byte 50 (`01` on, `00` off). Turning it on from the physical remote showed `01` in the cloud within seconds, so the read-only sensor matches the unit. A sparse FA write of 1-based index 51 = `01` was rejected with `unmatch`. There is a binary sensor and no switch.
+Super Jet is read from FA byte 50 (`01` on, `00` off). Super Jet set from the remote is reflected in the cloud status (FA byte 50 = `01`), with some lag; the sensor updates on the next poll. A sparse FA write of 1-based index 51 = `01` was rejected with `unmatch`. There is a binary sensor and no switch.
 
 The temperature slider runs from 16 °C to 30 °C. F0 names a per-model range table, but that table was not in the capture, so the slider uses this span. The cloud rejects a value the unit cannot use.
 
@@ -95,7 +95,7 @@ A 401 first retries login with the stored terminal id and cookies. If that fails
 
 Use one unit, then put it back. Leave experimental controls off for this pass.
 
-1. Confirm all three units appear, with the right on/off state, mode, room temperature, and setpoint. Super Jet follows the physical remote: on shows FA byte 50 = `01` within seconds. That read was confirmed.
+1. Confirm all three units appear, with the right on/off state, mode, room temperature, and setpoint. Super Jet set from the remote is reflected in the cloud status (FA byte 50 = `01`), with some lag; the sensor updates on the next poll.
 2. Change the setpoint by 1 °C, wait until the app shows the same number, then change it back. This path was confirmed live.
 3. Cool, Fan only, fan Auto, and Plasmacluster were confirmed live. Quiet, Very weak, Weak, and Strong have not been written yet. Leave Rapid off.
 4. Power on and power off were confirmed live (`80` = `30` and `80` = `31`). You can still turn the unit off and on once and put it back.
