@@ -359,8 +359,10 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set the fan speed. Rapid is sent only when the unit lists that speed."""
         device = self._device
-        if fan_mode == FAN_RAPID and (device is None or not device.caps.rapid):
+        if device is None:
             return
+        if fan_mode == FAN_RAPID and not device.caps.rapid:
+            raise ServiceValidationError("This air conditioner does not support Rapid")
         await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:

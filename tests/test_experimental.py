@@ -105,7 +105,7 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         assert climate.swing_horizontal_modes == ["straight", "left", "right", "swing"]
         assert ClimateEntityFeature.FAN_MODE in climate.supported_features
         assert ClimateEntityFeature.TARGET_TEMPERATURE in climate.supported_features
-        assert "rapid" in climate.fan_modes
+        assert "rapid" not in climate.fan_modes
 
         unique_ids = _unique_ids(hass, entry.entry_id)
         assert "1|013001_plasmacluster" in unique_ids
@@ -165,7 +165,7 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         climate = _climate(hass, "1|013001")
         assert climate.entity_id == "climate.living_room_ac"
         assert climate.precision == PRECISION_HALVES
-        assert "rapid" in climate.fan_modes
+        assert "rapid" not in climate.fan_modes
         assert climate.swing_horizontal_modes == ["straight", "left", "right", "swing"]
         unique_ids = _unique_ids(hass, entry.entry_id)
         assert "1|013001_sleep" not in unique_ids
@@ -181,7 +181,7 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         assert "1|013001_plasmacluster" in unique_ids
         assert "1|013001_super_jet" in unique_ids
         assert _climate(hass, "1|013001").entity_id == "climate.living_room_ac"
-        assert "rapid" in _climate(hass, "1|013001").fan_modes
+        assert "rapid" not in _climate(hass, "1|013001").fan_modes
 
     pair.assert_awaited()
 
@@ -223,7 +223,7 @@ async def test_rejected_pairing_is_not_retried_on_later_polls(hass, boxinfo):
 
 
 def _soft_box() -> dict:
-    """One unit whose capability bytes say Soft exists, and Rapid (fan byte 03)."""
+    """One unit whose capability bytes say Soft exists. Fan pattern 0x03 hides Rapid."""
     fa = bytearray(80)
     capabilities = bytearray(32)
     capabilities[4] = 0x21
@@ -303,7 +303,7 @@ async def test_untested_switch_keeps_its_entity_id(hass):
     assert registry.async_get_entity_id("switch", DOMAIN, "1|013001_sleep") is None
     assert registry.async_get_entity_id("switch", DOMAIN, "1|013001_speed") is None
     climate = _climate(hass, "1|013001")
-    assert climate.fan_modes[-1] == "rapid"
+    assert "rapid" not in climate.fan_modes
     assert "sleep" not in {item.key for item in SWITCHES}
     assert "speed" not in {item.key for item in SWITCHES}
 

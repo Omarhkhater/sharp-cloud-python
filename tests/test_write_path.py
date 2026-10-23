@@ -877,6 +877,23 @@ async def test_half_degree_down_across_a_whole_degree_sends_b3_then_fa(hass, mon
         await coordinator.async_shutdown()
 
 
+async def test_rapid_on_an_unsupported_unit_is_rejected(hass, monkeypatch):
+    """Fan patterns 0x02 and 0x03 hide Rapid. Requesting it is a service error."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device()
+    device.caps = Capabilities(rapid=False)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        with pytest.raises(ServiceValidationError):
+            await entity.async_set_fan_mode("rapid")
+        assert cloud.sent == []
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
 async def test_unsupported_vane_is_rejected_before_a_command(hass, monkeypatch):
     """A vane the capability bytes do not list is a service error, not a no-op."""
     _install_clock(monkeypatch)

@@ -67,7 +67,7 @@ def test_fixture_matches_the_live_decode(boxinfo):
     assert living.caps.horizontal_vanes == ("straight", "left", "right", "swing")
     assert "wide" not in living.caps.horizontal_vanes
     assert "auto" not in living.caps.horizontal_vanes
-    assert living.caps.rapid is True
+    assert living.caps.rapid is False
     assert living.caps.soft is False
     assert living.caps.speed is False
     assert living.caps.cocoro is False
@@ -322,7 +322,7 @@ def test_vane_lists_follow_the_capability_patterns():
     caps = parse_capabilities(bytes(listed))
     assert caps.horizontal_vanes == ("straight", "left", "right", "swing")
     assert caps.vertical_vanes == ("auto", "up", "horizontal", "down", "swing")
-    assert caps.rapid is True
+    assert caps.rapid is False
 
     narrow = bytearray(32)
     narrow[11] = 0x01
@@ -338,9 +338,10 @@ def test_vane_lists_follow_the_capability_patterns():
     assert "down1" in wider_caps.vertical_vanes
     assert "wide" in wider_caps.horizontal_vanes
     assert "auto" in wider_caps.horizontal_vanes
-    assert wider_caps.rapid is False
+    assert wider_caps.rapid is True
 
     hidden = bytearray(32)
+    hidden[12] = 0x02
     hidden[29] = 0x38
     assert parse_capabilities(bytes(hidden)).rapid is False
     assert parse_capabilities(bytes(16)).horizontal_vanes == ()

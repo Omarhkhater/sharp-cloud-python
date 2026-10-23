@@ -75,8 +75,7 @@ MODES: tuple[tuple[str, str], ...] = (
 )
 
 # EPC A0. Names follow the app's fan table.
-# Rapid (38) is offered only when the capability byte says the unit has it.
-# On a unit without that byte it was rejected, and the fan briefly reported 37.
+# Rapid (38) is hidden when F0 byte 12 is 0x02 or 0x03. These units report 0x03.
 FAN_RAPID = "rapid"
 FAN_MODES: tuple[tuple[str, str], ...] = (
     ("auto", "41"),

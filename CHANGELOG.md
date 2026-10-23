@@ -13,7 +13,7 @@ All notable changes to Sharp Air Egypt are listed here. Versions follow the GitH
 
 ### Removed
 - The Sleep and Speed switches.
-- Rapid is hidden on units that don't have it.
+- Rapid is hidden on units that don't support it.
 
 ### Fixed
 - A sign-in failure while sending a command asks you to sign in again only when Sharp refuses the saved terminal. Any other sign-in error does not.

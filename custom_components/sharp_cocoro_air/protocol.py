@@ -421,7 +421,9 @@ def parse_capabilities(blob: bytes | None) -> Capabilities:
         cocoro=(byte8 & 0x06) == 0x06,
         auto_has_setpoint=blob[13] == 0x05,
         a04=len(blob) > 29 and blob[29] >= 0x38,
-        rapid=len(blob) > 12 and blob[12] == 0x03,
+        # a.java treats fan patterns 0x02 and 0x03 as "no Rapid". These units
+        # report 0x03, so Rapid stays hidden.
+        rapid=blob[12] not in (0x02, 0x03),
         patrol=blob[6] == 0x41,
         vertical_vanes=_vertical_from_capability(blob),
         horizontal_vanes=_horizontal_from_capability(blob),

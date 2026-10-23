@@ -16,7 +16,7 @@ Control the Sharp air conditioners you use with the **SHARP Air Control** app (E
 
 Each indoor unit shows up as its own device with:
 
-- **Climate control:** on/off, Cool and Fan only modes (Heat, Dry and Auto are untested), target temperature from 16 to 30 °C, and fan speed (Auto, Quiet, Very weak, Weak, Strong)
+- **Climate control:** on/off, Cool and Fan only modes (Heat, Dry and Auto are untested), target temperature from 16 to 30 °C, and fan speed (Auto, Quiet, Very weak, Weak, Strong). Rapid is hidden on units that don't support it.
 - **Sensors:** room temperature, humidity and outdoor temperature (the outdoor value holds its last reading for up to 6 hours while the AC is off)
 - **Power and energy:** live watts and total kWh for the Energy dashboard (readings not yet checked against a meter)
 - **Plasmacluster** on/off switch
