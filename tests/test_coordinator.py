@@ -19,6 +19,7 @@ from custom_components.sharp_cocoro_air.client import (
     SharpAPIError,
     SharpAuthError,
     SharpConnectionError,
+    SharpTerminalRefused,
 )
 from custom_components.sharp_cocoro_air.const import DOMAIN
 from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
@@ -203,7 +204,7 @@ async def test_successful_poll_resets_the_auth_failure_count(hass):
 
 async def test_refused_terminal_login_reauths_immediately(hass):
     """A refused terminal id does not wait for three polls."""
-    cloud = _AuthCloud(SharpAuthError("terminal login refused"))
+    cloud = _AuthCloud(SharpTerminalRefused())
     coordinator = _auth_coordinator(hass, cloud)
     try:
         with pytest.raises(ConfigEntryAuthFailed):
@@ -211,6 +212,46 @@ async def test_refused_terminal_login_reauths_immediately(hass):
         assert coordinator._auth_failures == 1
     finally:
         await coordinator.async_shutdown()
+
+
+async def test_the_refusal_message_alone_does_not_skip_the_grace(hass):
+    """Reauth matches SharpTerminalRefused, not the message text."""
+    cloud = _AuthCloud(SharpAuthError("terminal login refused"))
+    coordinator = _auth_coordinator(hass, cloud)
+    try:
+        with pytest.raises(UpdateFailed):
+            await coordinator._async_update_data()
+        assert coordinator._auth_failures == 1
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_auth_failures_carry_across_a_new_setup(hass):
+    """A setup retry builds a new coordinator and still counts the earlier polls."""
+    cloud = _AuthCloud(SharpAuthError("Sharp sign-in expired"))
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    first = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(UpdateFailed):
+            await first._async_update_data()
+    finally:
+        await first.async_shutdown()
+
+    second = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(UpdateFailed):
+            await second._async_update_data()
+        assert second._auth_failures == 2
+    finally:
+        await second.async_shutdown()
+
+    third = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(ConfigEntryAuthFailed):
+            await third._async_update_data()
+    finally:
+        await third.async_shutdown()
 
 
 async def test_relogin_outage_is_update_failed_and_does_not_count(hass):

@@ -21,6 +21,7 @@ from custom_components.sharp_cocoro_air.client import (
     SharpClient,
     SharpConnectionError,
     SharpError,
+    SharpTerminalRefused,
     app_nonce,
 )
 from custom_components.sharp_cocoro_air.const import (
@@ -601,7 +602,7 @@ async def test_refused_terminal_login_is_not_retried():
     runner, base = await _serve(handle)
     client = await _client(base, "https://example.invalid/terminal/1")
     try:
-        with pytest.raises(SharpAuthError, match="terminal login refused"):
+        with pytest.raises(SharpTerminalRefused, match="terminal login refused"):
             await client.box_info()
         assert logins == 1
         assert box_hits == 1

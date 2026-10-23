@@ -26,6 +26,7 @@ from custom_components.sharp_cocoro_air.client import (
     SharpBusy,
     SharpClient,
     SharpError,
+    SharpTerminalRefused,
 )
 from custom_components.sharp_cocoro_air.climate import SharpClimate
 from custom_components.sharp_cocoro_air.const import (
@@ -466,7 +467,10 @@ async def test_busy_is_retried_once_after_ten_seconds(hass, monkeypatch):
 
 
 async def test_auth_failure_before_accept_does_not_refresh_or_resend(hass, monkeypatch):
-    """A 401 that never returns a control id does not arm the status timer."""
+    """A 401 that never returns a control id does not arm the status timer.
+
+    A rejection that is not a refused terminal id does not start reauth.
+    """
     clock = _install_clock(monkeypatch)
     cloud = _Cloud(clock)
     cloud.results = [SharpAuthError("expired")]
@@ -478,11 +482,29 @@ async def test_auth_failure_before_accept_does_not_refresh_or_resend(hass, monke
         with pytest.raises(HomeAssistantError, match="sign-in expired"):
             await coordinator.async_send(device.unique_key, _B3, setpoint=22.0)
         assert len(cloud.sent) == 1
-        assert reauth == [True]
+        assert reauth == []
         assert coordinator._refresh_unsub is None
         await _advance(hass, 20)
         assert cloud.box_reads == 0
         assert len(cloud.sent) == 1
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_refused_terminal_on_a_write_starts_reauth(hass, monkeypatch):
+    """Only a refused terminal id during a write asks the user to sign in again."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.results = [SharpTerminalRefused()]
+    device = _device()
+    coordinator = _coordinator(hass, cloud, device)
+    reauth: list[bool] = []
+    coordinator.entry.async_start_reauth = lambda *_args, **_kwargs: reauth.append(True)
+    try:
+        with pytest.raises(HomeAssistantError, match="sign in again"):
+            await coordinator.async_send(device.unique_key, _B3, setpoint=22.0)
+        assert reauth == [True]
+        assert coordinator._refresh_unsub is None
     finally:
         await coordinator.async_shutdown()
 
