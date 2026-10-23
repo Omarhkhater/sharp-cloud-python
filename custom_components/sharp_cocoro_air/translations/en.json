@@ -2,23 +2,102 @@
   "config": {
     "step": {
       "user": {
-        "title": "Sharp COCORO AIR",
-        "description": "Configure your Sharp COCORO AIR account.",
+        "title": "Sharp Air Control",
+        "description": "Sign in to SHARP Air Control in your browser, then paste the full address of the page that fails to load (or paste just the code).\n\n{authorize_url}\n\nThe page https://sharp-cocoroair-egypt will not open. Copy the address bar anyway. It looks like https://sharp-cocoroair-egypt/?code=...",
         "data": {
-          "username": "Username",
-          "password": "Password",
-          "region": "Region",
-          "refresh_interval": "Refresh interval (seconds)"
+          "redirect_url": "Redirect URL or code"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "The Sharp session expired. Sign in again in your browser, then paste the full address of the page that fails to load (or paste just the code).\n\n{authorize_url}\n\nThe page https://sharp-cocoroair-egypt will not open. Copy the address bar anyway.",
+        "data": {
+          "redirect_url": "Redirect URL or code"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect",
-      "invalid_auth": "Invalid authentication",
-      "unknown": "Unexpected error"
+      "cannot_connect": "Could not reach the Sharp cloud.",
+      "invalid_auth": "Sharp rejected that code. Open the link again and paste a new one.",
+      "invalid_code": "No sign-in code was found in that text.",
+      "unknown": "Something unexpected went wrong."
     },
     "abort": {
-      "already_configured": "Device is already configured"
+      "already_configured": "This Sharp account is already set up.",
+      "reauth_successful": "Signed in again."
+    }
+  },
+  "entity": {
+    "climate": {
+      "aircon": {
+        "state_attributes": {
+          "fan_mode": {
+            "state": {
+              "auto": "Auto",
+              "quiet": "Quiet",
+              "very_weak": "Very weak",
+              "weak": "Weak",
+              "strong": "Strong",
+              "rapid": "Rapid"
+            }
+          },
+          "swing_mode": {
+            "state": {
+              "auto": "Auto",
+              "up": "Up",
+              "horizontal": "Horizontal",
+              "down1": "Down 1",
+              "down2": "Down 2",
+              "down": "Down",
+              "swing": "Swing"
+            }
+          },
+          "swing_horizontal_mode": {
+            "state": {
+              "auto": "Auto",
+              "straight": "Straight",
+              "left": "Left",
+              "right": "Right",
+              "wide": "Wide",
+              "enclose": "Enclose",
+              "swing": "Swing"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "outdoor_temperature": {
+        "name": "Outdoor temperature"
+      },
+      "power": {
+        "name": "Power"
+      },
+      "energy": {
+        "name": "Energy"
+      }
+    },
+    "switch": {
+      "plasmacluster": {
+        "name": "Plasmacluster"
+      },
+      "sleep": {
+        "name": "Sleep"
+      },
+      "soft": {
+        "name": "Soft"
+      },
+      "speed": {
+        "name": "Speed"
+      },
+      "cocoro_air": {
+        "name": "Cocoro Air"
+      }
+    },
+    "binary_sensor": {
+      "fault": {
+        "name": "Fault"
+      }
     }
   }
 }

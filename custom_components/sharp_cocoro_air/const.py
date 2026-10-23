@@ -1,26 +1,102 @@
-"""Constants for the Sharp COCORO AIR integration."""
+"""Constants for the Sharp Air Control (Egypt) integration."""
 
 from __future__ import annotations
+
+from datetime import timedelta
 
 DOMAIN = "sharp_cocoro_air"
 
 MANUFACTURER = "Sharp"
 
-DEFAULT_SCAN_INTERVAL = 30
+# Public app constants from the SHARP Air Control APK. These ship in every
+# copy of the app; they are not account credentials.
+HMS_API = "https://eg-hms.cloudlabs.sharp.co.jp/hems/pfApi/ta/"
+APP_SECRET = "pngtfljRoYsJE9NW7opn1t2cXA5MtZDKbwon368hs80="
+SERVICE_NAME = "sharp-egy"
+USER_AGENT = "smartlink_v200a_eg HomeAssistant"
+# The cloud records this appName on the paired terminal. Keep it aligned with
+# the Android build the live pairing test used.
+APP_NAME = "spremote_a_eg:1:1.0.4"
 
-PLATFORMS = [
-    "climate",
-    "sensor",
-]
+B2C_AUTHORIZE = (
+    "https://elaiotb2cprd.b2clogin.com/elaiotb2cprd.onmicrosoft.com/"
+    "b2c_1a_signup_signin/oauth2/v2.0/authorize"
+)
+B2C_CLIENT_ID = "66e7f408-b1bf-46a8-b467-32204ab52f93"
+B2C_REDIRECT = "https://sharp-cocoroair-egypt"
+B2C_SCOPE = "openid offline_access"
 
-CONF_REGION = "region"
+SCAN_INTERVAL = timedelta(seconds=60)
 
-CONF_USERNAME = "username"
+# F0 byte 13 selects a range table that is not present in the captured frames.
+# The slider covers the usual Sharp remote span with a little headroom. The
+# unit rejects a value it cannot use, and that command is not applied locally.
+TEMP_MIN = 16.0
+TEMP_MAX = 32.0
 
-CONF_PASSWORD = "password"
+CONF_REDIRECT_URL = "redirect_url"
+CONF_TERMINAL_APP_ID = "terminal_app_id"
+CONF_COOKIES = "cookies"
+CONF_USER_ID = "user_id"
 
-CONF_REFRESH_INTERVAL = "refresh_interval"
+# ECHONET operation-mode codes (EPC B0).
+MODE_AUTO = "auto"
+MODE_COOL = "cool"
+MODE_HEAT = "heat"
+MODE_DRY = "dry"
+MODE_FAN = "fan_only"
 
-DEFAULT_REGION = "egypt"
+MODES: tuple[tuple[str, str], ...] = (
+    (MODE_AUTO, "41"),
+    (MODE_COOL, "42"),
+    (MODE_HEAT, "43"),
+    (MODE_DRY, "44"),
+    (MODE_FAN, "45"),
+)
 
-DEFAULT_REFRESH_INTERVAL = 30
+# EPC A0. Names follow the app's fan table.
+FAN_MODES: tuple[tuple[str, str], ...] = (
+    ("auto", "41"),
+    ("quiet", "31"),
+    ("very_weak", "33"),
+    ("weak", "35"),
+    ("strong", "37"),
+    ("rapid", "38"),
+)
+
+# FA frame, 1-based byte 49. "horizontal" is the level vane position.
+VANE_VERTICAL: tuple[tuple[str, str], ...] = (
+    ("auto", "00"),
+    ("up", "01"),
+    ("horizontal", "02"),
+    ("down1", "03"),
+    ("down2", "04"),
+    ("down", "05"),
+    ("swing", "07"),
+)
+
+# FA frame, 1-based byte 50.
+VANE_HORIZONTAL: tuple[tuple[str, str], ...] = (
+    ("auto", "0A"),
+    ("straight", "01"),
+    ("left", "02"),
+    ("right", "03"),
+    ("wide", "07"),
+    ("enclose", "08"),
+    ("swing", "0F"),
+)
+
+POWER_ON = "30"
+POWER_OFF = "31"
+PLASMACLUSTER_ON = "41"
+PLASMACLUSTER_OFF = "42"
+FAULT_CODE = "41"
+
+# 1-based indexes inside the FA payload, as used by the app's frame builder.
+FA_COCORO = 17
+FA_SPEED = 19
+FA_SETPOINT = 27
+FA_SOFT = 42
+FA_SLEEP = 43
+FA_VANE_VERTICAL = 49
+FA_VANE_HORIZONTAL = 50
