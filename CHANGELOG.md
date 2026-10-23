@@ -7,7 +7,8 @@ All notable changes to Sharp Air Egypt are listed here. Versions follow the GitH
 ### Fixed
 - Vertical airflow lists the same seven positions as the SHARP app: Auto, Up, Level, Slightly down, Further down, Fully down, and Swing. The position previously called Horizontal is now Level, and its state value changed from `horizontal` to `level`.
 - Choosing a vane position shows on the card immediately. If the change fails, the card snaps back. Picking again while a change is still in progress sends the latest choice.
-- A command the cloud refuses says whether the unit is busy, names the refusal code, or names the HTTP status. A status refresh follows every failed write.
+- A command the cloud refuses says whether the unit is busy, names the refusal code, or names the HTTP status. A status refresh follows every failed write. A failed read-back still says the change could not be confirmed.
+- HomeKit Bridge: a target temperature is snapped to the unit's step before it is sent, and Super Jet is a diagnostic sensor so it is not exposed as occupancy.
 
 ## [0.3.0] - 2026-10-24
 

@@ -297,11 +297,20 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         return None if device is None else device.fan
 
     def _shown_vane(self, key: str, actual: str | None) -> str | None:
-        """The pick, while it is still within the grace period."""
-        if _monotonic() < self._pending_vanes_until:
-            pending = self._pending_vanes.get(key)
-            if pending is not None:
-                return pending
+        """The pick while a send is in progress, then for 30 s after it finishes.
+
+        The grace period starts when the send ends. Until then the expiry is
+        unset, so a slow read-back cannot snap the card back to the old value.
+        """
+        pending = self._pending_vanes.get(key)
+        if pending is None:
+            return actual
+        if (
+            self._vane_send_running
+            or self._pending_vanes_until <= 0.0
+            or _monotonic() < self._pending_vanes_until
+        ):
+            return pending
         return actual
 
     @property
@@ -331,16 +340,22 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         device = self._device
         if device is None:
             return
+        temperature = kwargs.get(ATTR_TEMPERATURE)
+        target: float | None = None
+        if temperature is not None:
+            # HomeKit sends tenths. Snap before any write so 21.3 is 21.5.
+            raw = float(temperature)
+            if device.caps.half_degree:
+                target = round(raw * 2) / 2
+            else:
+                target = snap_whole_degree(raw)
         if kwargs.get(ATTR_HVAC_MODE) not in (None, HVACMode.OFF):
             await self.async_set_hvac_mode(kwargs[ATTR_HVAC_MODE])
             device = self._device or device
-        temperature = kwargs.get(ATTR_TEMPERATURE)
-        if temperature is None:
+        if target is None:
             return
-        target = float(temperature)
-        half_degree = device.caps.half_degree
-        if not half_degree:
-            target = snap_whole_degree(target)
+        if device.setpoint is not None and target == device.setpoint:
+            return
         self._pending_target = target
         self.async_write_ha_state()
         if self._debounce_unsub is not None:
@@ -422,11 +437,11 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set the vertical vane. Both vane bytes go out in one frame."""
+        """Set the vertical vane. The frame also carries the current horizontal position."""
         await self._async_set_vanes(vertical=swing_mode)
 
     async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
-        """Set the horizontal vane. Both vane bytes go out in one frame."""
+        """Set the horizontal vane. The frame also carries the current vertical position."""
         await self._async_set_vanes(horizontal=swing_horizontal_mode)
 
     async def _async_set_vanes(
@@ -445,31 +460,34 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             self._pending_vanes["vane_vertical"] = vertical
         if horizontal is not None:
             self._pending_vanes["vane_horizontal"] = horizontal
-        self._pending_vanes_until = _monotonic() + PENDING_GRACE_S
-        self.async_write_ha_state()
         if self._vane_send_running:
+            self.async_write_ha_state()
             return
         self._vane_send_running = True
+        self.async_write_ha_state()
         try:
             while True:
                 wanted = dict(self._pending_vanes)
-                await self.coordinator.async_send_built(
-                    self._key,
-                    lambda fresh, picked=wanted: _vane_frame(fresh, picked),
-                    **wanted,
-                )
+                try:
+                    await self.coordinator.async_send_built(
+                        self._key,
+                        lambda fresh, picked=wanted: _vane_frame(fresh, picked),
+                        **wanted,
+                    )
+                except HomeAssistantError:
+                    if self._pending_vanes == wanted:
+                        self._pending_vanes.clear()
+                        self._pending_vanes_until = 0.0
+                        self.async_write_ha_state()
+                        raise
+                    continue
                 if self._pending_vanes == wanted:
                     break
-        except HomeAssistantError:
-            self._pending_vanes.clear()
-            self._pending_vanes_until = 0.0
-            self.async_write_ha_state()
-            raise
         finally:
             self._vane_send_running = False
-        self._pending_vanes.clear()
-        self._pending_vanes_until = 0.0
-        self.async_write_ha_state()
+        if self._pending_vanes:
+            self._pending_vanes_until = _monotonic() + PENDING_GRACE_S
+            self.async_write_ha_state()
 
     async def async_turn_on(self) -> None:
         """Power on without changing the mode."""

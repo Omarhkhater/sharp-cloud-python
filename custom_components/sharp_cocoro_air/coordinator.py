@@ -282,9 +282,14 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                         await self._wait_settle(box_id)
                         try:
                             result = await self.client.send_control(device, status)
-                        except SharpBusy:
+                        except SharpBusy as busy:
                             await _pause(_BUSY_RETRY_S)
-                            result = await self.client.send_control(device, status)
+                            try:
+                                result = await self.client.send_control(device, status)
+                            except SharpBusy as again:
+                                _LOGGER.warning("deviceControl refused, errorCode=%s", again.code)
+                                raise
+                            _LOGGER.debug("deviceControl busy, errorCode=%s", busy.code)
                         if result == "unmatch" and _is_fa(status):
                             try:
                                 result = await self._confirm_fa(device, updates)
@@ -296,23 +301,35 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                     finally:
                         self._last_result_at[box_id] = _monotonic()
         except SharpTerminalRefused:
+            if confirm_failed:
+                self._schedule_status_refresh()
+                raise HomeAssistantError(_UNCONFIRMED) from None
             self._set_auth_failures(0)
             self.entry.async_start_reauth(self.hass)
             raise HomeAssistantError(
                 "Sharp sign-in expired. Open the integration and sign in again."
             ) from None
         except SharpAuthError:
+            if confirm_failed:
+                self._schedule_status_refresh()
+                raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError("Sharp sign-in expired") from None
         except SharpBusy:
             self._schedule_status_refresh()
+            if confirm_failed:
+                raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError(
                 "The air conditioner is busy. Try again in a few seconds."
             ) from None
         except SharpRefused as err:
             self._schedule_status_refresh()
+            if confirm_failed:
+                raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError(f"Sharp refused the command (code {err.code})") from None
         except SharpAPIError as err:
             self._schedule_status_refresh()
+            if confirm_failed:
+                raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError(
                 f"The Sharp cloud rejected the request (HTTP {err.status})"
             ) from None

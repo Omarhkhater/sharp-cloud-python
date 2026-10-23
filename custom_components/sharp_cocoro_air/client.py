@@ -528,9 +528,9 @@ class SharpClient:
         error_code = item.get("errorCode")
         if error_code not in (None, "null", ""):
             code = str(error_code)
-            _LOGGER.warning("deviceControl refused, errorCode=%s", code)
             if code in _BUSY_CODES:
                 raise SharpBusy(code)
+            _LOGGER.warning("deviceControl refused, errorCode=%s", code)
             raise SharpRefused(code)
         if "id" not in item:
             raise SharpError("The air conditioner did not accept the command")

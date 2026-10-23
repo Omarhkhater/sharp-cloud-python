@@ -418,6 +418,10 @@ async def test_unmatch_is_a_result_and_busy_codes_are_distinct(cloud, caplog):
         with pytest.raises(SharpBusy) as busy:
             await client.send_control(device, cmd_setpoint(22, half_degree=False, frame_end=80))
         assert busy.value.code == "E1001001"
+        assert not any(
+            record.levelname == "WARNING" and "E1001001" in record.getMessage()
+            for record in caplog.records
+        )
 
         fake.control_error = "E1001999"
         with pytest.raises(SharpRefused) as rejected:

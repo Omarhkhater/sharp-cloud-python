@@ -827,6 +827,63 @@ def _fa_byte(status: list[dict], index: int) -> int:
     return bytes.fromhex(status[0]["valueBinary"]["code"])[index]
 
 
+async def test_homekit_tenths_snap_to_the_half_degree_step(hass, monkeypatch):
+    """21.3 from 20 snaps to 21.5 and sends the whole degree first."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=20.0)
+    device.caps = Capabilities(half_degree=True)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await _flush_temperature(hass, entity, 21.3)
+        assert len(cloud.sent) == 2
+        assert cloud.sent[0][1][0]["statusCode"] == "b3"
+        assert cloud.sent[0][1][0]["valueRange"]["code"] == "21"
+        assert cloud.sent[1][1][0]["statusCode"] == "fa"
+        assert _fa_byte(cloud.sent[1][1], 26) == 43
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_homekit_tenths_that_snap_to_the_current_value_are_not_sent(hass, monkeypatch):
+    """21.2 on a half-degree unit snaps to 21, which is already the setpoint."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    device.caps = Capabilities(half_degree=True)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.2})
+        assert cloud.sent == []
+        assert entity.target_temperature == 21.0
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_homekit_tenths_on_a_whole_degree_unit_snap_before_sending(hass, monkeypatch):
+    """A unit without half degrees snaps 21.4 to 21 (no send) and 21.6 to 22."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    device.caps = Capabilities(half_degree=False)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.4})
+        assert cloud.sent == []
+        await _flush_temperature(hass, entity, 21.6)
+        assert len(cloud.sent) == 1
+        assert cloud.sent[0][1][0]["statusCode"] == "b3"
+        assert cloud.sent[0][1][0]["valueRange"]["code"] == "22"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
 async def test_half_degree_across_a_whole_degree_sends_b3_then_fa(hass, monkeypatch):
     """21 to 22.5 sends the whole degree first, then FA byte 26."""
     _install_clock(monkeypatch)
@@ -1029,7 +1086,9 @@ async def test_vane_pick_shows_while_the_call_is_in_flight(hass, monkeypatch, ki
         cloud.hold.set()
         await task
         assert _vane_state(entity, kind) == pick
-        assert entity._pending_vanes == {}
+        key = "vane_vertical" if kind == "vertical" else "vane_horizontal"
+        assert entity._pending_vanes.get(key) == pick
+        assert entity._pending_vanes_until > 0
     finally:
         if not task.done():
             cloud.hold.set()
@@ -1274,6 +1333,144 @@ async def test_refused_and_http_errors_name_the_cause_and_refresh(hass, monkeypa
         assert coordinator._refresh_unsub is not None
     finally:
         await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize(
+    ("failure", "exc"),
+    [
+        ("http", SharpAPIError(503)),
+        ("busy", SharpBusy("E1001001")),
+        ("refused", SharpRefused("E1004001")),
+    ],
+)
+async def test_read_back_errors_say_the_change_was_not_confirmed(hass, monkeypatch, failure, exc):
+    """An error while reading status back is not a busy, refused, or HTTP message."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.results = ["unmatch"]
+    device = _device()
+    device.vane_vertical = "up"
+    coordinator = _coordinator(hass, cloud, device)
+    status = cmd_vanes(vertical="down", horizontal=None, frame_end=80)
+
+    async def fail_read() -> dict:
+        cloud.box_reads += 1
+        raise exc
+
+    cloud.box_info = fail_read  # type: ignore[method-assign]
+    try:
+        with pytest.raises(HomeAssistantError, match="couldn't be confirmed") as caught:
+            await coordinator.async_send(device.unique_key, status, vane_vertical="down")
+        text = str(caught.value)
+        assert "HTTP" not in text
+        assert "busy" not in text.lower()
+        assert "E100" not in text
+        assert failure
+        assert coordinator._refresh_unsub is not None
+        assert coordinator.data[device.unique_key].vane_vertical == "up"
+        assert len(cloud.sent) == 1
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_failed_vane_send_keeps_the_newer_pick(hass, monkeypatch):
+    """A failed in-flight send does not drop picks whose calls already returned."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.hold = asyncio.Event()
+    cloud.results = [SharpError("rejected"), "success"]
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(_set_vane(entity, "vertical", "down"))
+    try:
+        await asyncio.sleep(0)
+        assert len(cloud.sent) == 1
+        await _set_vane(entity, "vertical", "level")
+        await _set_vane(entity, "vertical", "swing")
+        assert entity.swing_mode == "swing"
+        cloud.hold.set()
+        await first
+        assert len(cloud.sent) == 2
+        first_raw = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        last_raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
+        assert first_raw[48] == 0x05
+        assert last_raw[48] == 0x07
+        assert entity.swing_mode == "swing"
+    finally:
+        if not first.done():
+            cloud.hold.set()
+            first.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_pending_vane_does_not_expire_while_the_send_is_running(hass, monkeypatch):
+    """The 30 s grace starts when the send finishes, not when the user picks."""
+    clock = _install_clock(monkeypatch)
+    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
+    cloud = _Cloud(clock)
+    cloud.hold = asyncio.Event()
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    task = hass.async_create_task(entity.async_set_swing_mode("down"))
+    try:
+        await asyncio.sleep(0)
+        assert entity._vane_send_running is True
+        assert entity._pending_vanes_until == 0.0
+        assert entity.swing_mode == "down"
+        clock.now += PENDING_GRACE_S + 5
+        assert entity.swing_mode == "down"
+        cloud.hold.set()
+        await task
+        assert entity._vane_send_running is False
+        assert entity._pending_vanes_until == clock.now + PENDING_GRACE_S
+        coordinator.data[device.unique_key].vane_vertical = "up"
+        assert entity.swing_mode == "down"
+        clock.now = entity._pending_vanes_until
+        assert entity.swing_mode == "up"
+    finally:
+        if not task.done():
+            cloud.hold.set()
+            task.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_busy_retry_logs_debug_when_it_succeeds_and_warning_when_it_fails(
+    hass, monkeypatch, caplog
+):
+    """A busy answer that is retried successfully stays at debug. The final failure is a warning."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _device()
+    coordinator = _coordinator(hass, cloud, device)
+    caplog.set_level("DEBUG", logger="custom_components.sharp_cocoro_air.coordinator")
+    try:
+        cloud.results = [SharpBusy("E1001001"), "success"]
+        await coordinator.async_send(device.unique_key, _B3, setpoint=22.0)
+        logged = [
+            (record.levelname, record.getMessage())
+            for record in caplog.records
+            if record.name == "custom_components.sharp_cocoro_air.coordinator"
+        ]
+        assert ("DEBUG", "deviceControl busy, errorCode=E1001001") in logged
+        assert not any(level == "WARNING" for level, _message in logged)
+
+        caplog.clear()
+        cloud.results = [SharpBusy("E1001001"), SharpBusy("E1001002")]
+        with pytest.raises(HomeAssistantError, match="busy"):
+            await coordinator.async_send(device.unique_key, _B3, setpoint=23.0)
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and record.name == "custom_components.sharp_cocoro_air.coordinator"
+        ]
+        assert warnings == ["deviceControl refused, errorCode=E1001002"]
+    finally:
         await coordinator.async_shutdown()
 
 
