@@ -58,13 +58,16 @@ MODES: tuple[tuple[str, str], ...] = (
 )
 
 # EPC A0. Names follow the app's fan table.
+# Rapid (38) was rejected live: controlResult came back "unmatch", and the
+# unit briefly reported 37. It is not in the default list.
+FAN_RAPID = "rapid"
 FAN_MODES: tuple[tuple[str, str], ...] = (
     ("auto", "41"),
     ("quiet", "31"),
     ("very_weak", "33"),
     ("weak", "35"),
     ("strong", "37"),
-    ("rapid", "38"),
+    (FAN_RAPID, "38"),
 )
 
 # FA frame, 1-based index 49 (0-based byte 48). Section 4.2's table says 48,
@@ -105,3 +108,6 @@ FA_SOFT = 42
 FA_SLEEP = 43
 FA_VANE_VERTICAL = 49
 FA_VANE_HORIZONTAL = 50
+# 1-based index 51 is 0-based byte 50. Live read: 01 on, 00 off.
+# A sparse write of idx 51 = 01 was rejected (controlResult "unmatch").
+FA_SUPER_JET = 51

@@ -22,6 +22,7 @@ from . import SharpConfigEntry
 from .const import (
     DOMAIN,
     FAN_MODES,
+    FAN_RAPID,
     MANUFACTURER,
     MODE_AUTO,
     MODE_COOL,
@@ -101,7 +102,6 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         HVACMode.FAN_ONLY,
         HVACMode.AUTO,
     ]
-    _attr_fan_modes: ClassVar[list[str]] = [name for name, _code in FAN_MODES]
 
     def __init__(self, coordinator: SharpCoordinator, key: str) -> None:
         """Bind the entity to one unit."""
@@ -201,6 +201,14 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         return None if device is None else device.setpoint
 
     @property
+    def fan_modes(self) -> list[str]:
+        """Fan speeds. Rapid stays hidden until experimental controls are on."""
+        modes = [name for name, _code in FAN_MODES if name != FAN_RAPID]
+        if self.coordinator.experimental:
+            modes.append(FAN_RAPID)
+        return modes
+
+    @property
     def fan_mode(self) -> str | None:
         """Current fan speed."""
         device = self._device
@@ -249,7 +257,9 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         await self.coordinator.async_send(self._key, status, setpoint=target)
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
-        """Set the fan speed."""
+        """Set the fan speed. Rapid is experimental and was rejected live."""
+        if fan_mode == FAN_RAPID and not self.coordinator.experimental:
+            return
         await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:

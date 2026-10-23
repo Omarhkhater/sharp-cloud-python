@@ -32,7 +32,7 @@
     "step": {
       "init": {
         "title": "Sharp Air Control options",
-        "description": "Experimental controls send FA-frame commands that have not been confirmed on a live unit. Half-degree temperatures, vane positions, Sleep, Soft, Speed and Cocoro Air stay hidden while this is off.",
+        "description": "Experimental controls send commands that were not confirmed on a live unit. Half-degree temperatures, vane positions, the Rapid fan speed, Sleep, Soft, Speed and Cocoro Air stay hidden while this is off. Rapid was rejected by a live unit.",
         "data": {
           "experimental_controls": "Enable experimental controls"
         }
@@ -50,7 +50,7 @@
               "very_weak": "Very weak",
               "weak": "Weak",
               "strong": "Strong",
-              "rapid": "Rapid"
+              "rapid": "Rapid (possibly unsupported)"
             }
           },
           "swing_mode": {
@@ -109,6 +109,9 @@
     "binary_sensor": {
       "fault": {
         "name": "Fault"
+      },
+      "super_jet": {
+        "name": "Super Jet"
       }
     }
   }

@@ -13,7 +13,8 @@
       "cocoro_air": {"default": "mdi:home-thermometer"}
     },
     "binary_sensor": {
-      "fault": {"default": "mdi:alert-circle"}
+      "fault": {"default": "mdi:alert-circle"},
+      "super_jet": {"default": "mdi:weather-windy"}
     }
   }
 }

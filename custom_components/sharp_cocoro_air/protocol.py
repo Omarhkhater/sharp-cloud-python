@@ -20,6 +20,7 @@ from .const import (
     FA_SLEEP,
     FA_SOFT,
     FA_SPEED,
+    FA_SUPER_JET,
     FA_VANE_HORIZONTAL,
     FA_VANE_VERTICAL,
     FAN_MODES,
@@ -294,6 +295,7 @@ class Aircon:
     soft: bool | None = None
     speed: bool | None = None
     cocoro_air: bool | None = None
+    super_jet: bool | None = None
     caps: Capabilities = field(default_factory=Capabilities)
     frame_end: int = 80
 
@@ -503,6 +505,7 @@ def aircon_from_parts(
         soft=_flag(fa_byte(FA_SOFT)),
         speed=_flag(fa_byte(FA_SPEED)),
         cocoro_air=_flag(fa_byte(FA_COCORO)),
+        super_jet=_flag(fa_byte(FA_SUPER_JET)),
         caps=caps,
         frame_end=frame_end,
     )
@@ -645,6 +648,7 @@ def device_diagnostics(device: Aircon) -> dict:
         "soft": device.soft,
         "speed": device.speed,
         "cocoro_air": device.cocoro_air,
+        "super_jet": device.super_jet,
         "half_degree": device.caps.half_degree,
         "soft_capable": device.caps.soft,
         "speed_capable": device.caps.speed,

@@ -57,18 +57,25 @@ Each air conditioner:
 | Energy | Cumulative kWh from EPC `85`, using the ECHONET scale of 0.001 kWh per count |
 | Plasmacluster | On/off, EPC `CF` |
 | Fault | On when EPC `88` reports a fault |
+| Super Jet | Read-only. On when FA byte 50 is `01` |
 
-Only the browser sign-in, terminal pairing, and a whole-degree setpoint change were confirmed on a live unit (21 °C → 22 °C → 21 °C, EPC `B3`). Power, mode, fan, and Plasmacluster are the same kind of single-EPC write and need one supervised test each before you rely on them.
+Confirmed live on the Living Room AY-XP12YHE: browser sign-in, terminal pairing, a whole-degree setpoint (21 °C → 22 °C → 21 °C, EPC `B3`), power on and off (`80` = `30` and `80` = `31`, `valueSingle`), and fan Auto (`A0` = `41`, `valueSingle`).
+
+Fan Rapid (`A0` = `38`) was rejected. `controlResult` came back `unmatch`, and the unit briefly reported `37` (Strong). Rapid is hidden unless experimental controls are on, and the label says it may be unsupported. Do not expect it to stick.
+
+Super Jet is readable at FA byte 50 (`01` on, `00` off). A sparse FA write of 1-based index 51 = `01` was also rejected with `unmatch`. There is a binary sensor and no switch.
+
+Mode and Plasmacluster are the same kind of single-EPC write and still need one supervised test each.
 
 The temperature slider runs from 16 °C to 30 °C. F0 names a per-model range table, but that table was not in the capture, so the slider uses this span. The cloud rejects a value the unit cannot use.
 
-Fan speeds are Auto, Quiet, Very weak, Weak, Strong, and Rapid.
+Fan speeds are Auto, Quiet, Very weak, Weak, and Strong.
 
 The integration polls about every 60 seconds. After a command is accepted, the entity updates immediately instead of waiting for the next poll.
 
 ### Experimental controls
 
-Half-degree setpoints, vertical and horizontal vanes, and the Sleep switch send the Sharp FA frame. Those writes were not confirmed live. They are off by default.
+Half-degree setpoints, vertical and horizontal vanes, the Rapid fan speed, and the Sleep switch are off by default. Rapid was rejected on a live unit. The other writes in this group were not confirmed live.
 
 To turn them on: **Settings → Devices & services → Sharp Air Control → Configure**, then enable **Enable experimental controls**. Soft, Speed, and Cocoro Air appear only after that, and only when that unit's capability data says the feature exists. On the three units above, those bits are off, so those three switches stay hidden.
 
@@ -92,8 +99,8 @@ Use one unit, then put it back. Leave experimental controls off for this pass.
 
 1. Confirm all three units appear, with the right on/off state, mode, room temperature, and setpoint.
 2. Change the setpoint by 1 °C, wait until the app shows the same number, then change it back. This path was confirmed live.
-3. Change the mode, then the fan speed, then Plasmacluster. Put each one back. These still need one supervised test.
-4. Turn the unit off and on, and put it back. Power on/off also needs that supervised test.
+3. Change the mode, then a fan speed other than Rapid, then Plasmacluster. Put each one back. Mode and Plasmacluster still need one supervised test. Fan Auto was confirmed live. Leave Rapid off.
+4. Power on and power off were confirmed live (`80` = `30` and `80` = `31`). You can still turn the unit off and on once and put it back.
 5. Compare **Power** (W) with the unit while it is cooling, and compare **Energy** (kWh) with the app's energy graph. Energy uses the standard ECHONET scaling and has not been checked against the app's graph.
 6. Restart Home Assistant and confirm the units come back without another sign-in.
 
@@ -101,7 +108,7 @@ Use one unit, then put it back. Leave experimental controls off for this pass.
 
 These are left out because the capture does not pin them down:
 
-- Super Jet
+- Super Jet writes (the on/off state is read from FA byte 50)
 - Eco, filter-cleaning, and dust-filter commands
 - Patrol / auto-guard
 - The separate `A1` vane code (swing uses the FA vane tables)

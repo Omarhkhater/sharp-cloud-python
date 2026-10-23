@@ -241,6 +241,42 @@ def test_vane_indexes_follow_the_fixture_not_section_42(boxinfo):
     assert raw[47] == 0x00
 
 
+def test_super_jet_is_fa_byte_50(boxinfo):
+    """Super Jet is FA byte 50 (1-based index 51). 01 is on and 00 is off.
+
+    The captured frames are off. Byte 49 is the horizontal vane, so reading
+    that byte as Super Jet would show the feature on while it is off.
+    """
+    frames = [parse_echonet_property(item["echonetProperty"])[0xFA] for item in boxinfo["devices"]]
+    assert [frame[50] for frame in frames] == [0x00, 0x00, 0x00]
+    assert frames[0][49] == 0x01
+
+    _ids, devices = split_box_info(boxinfo)
+    assert [device.super_jet for device in devices] == [False, False, False]
+
+    on = _device_with_fa_byte(50, 0x01)
+    off = _device_with_fa_byte(50, 0x00)
+    assert on is not None and on.super_jet is True
+    assert off is not None and off.super_jet is False
+
+
+def _device_with_fa_byte(index: int, value: int):
+    fa = bytearray(80)
+    fa[index] = value
+    body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, 1, 0xFA, len(fa)])
+    body.extend(fa)
+    return aircon_from_record(
+        "box-1",
+        {
+            "deviceId": 4,
+            "echonetNode": "00-11-22-33-44-55",
+            "echonetObject": "013001",
+            "echonetProperty": body.hex(),
+            "labelData": {"name": "Jet", "deviceType": "AIR_CON"},
+        },
+    )
+
+
 def test_mode_power_fan_and_vanes():
     """Commands follow the EPC tables and do not force Plasmacluster on."""
     assert cmd_power(False) == [

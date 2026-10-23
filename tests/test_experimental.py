@@ -80,11 +80,21 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         assert climate.swing_modes is None
         assert ClimateEntityFeature.FAN_MODE in climate.supported_features
         assert ClimateEntityFeature.TARGET_TEMPERATURE in climate.supported_features
+        assert "rapid" not in climate.fan_modes
 
         unique_ids = _unique_ids(hass, entry.entry_id)
         assert "1|013001_plasmacluster" in unique_ids
+        assert "1|013001_super_jet" in unique_ids
         assert "1|013001_sleep" not in unique_ids
         assert "1|013001_soft" not in unique_ids
+        super_jet = next(
+            entity
+            for entity in hass.data["binary_sensor"].entities
+            if entity.unique_id == "1|013001_super_jet"
+        )
+        assert super_jet.entity_category is None
+        assert super_jet.entity_registry_enabled_default is True
+        assert super_jet.is_on is False
         fault = next(
             entity
             for entity in hass.data["binary_sensor"].entities
@@ -129,6 +139,7 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         climate = _climate(hass, "1|013001")
         assert climate.precision == PRECISION_HALVES
         assert climate.target_temperature_step == PRECISION_HALVES
+        assert climate.fan_modes[-1] == "rapid"
         assert ClimateEntityFeature.SWING_MODE in climate.supported_features
         assert ClimateEntityFeature.SWING_HORIZONTAL_MODE in climate.supported_features
         assert climate.swing_modes is not None
@@ -143,6 +154,8 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         unique_ids = _unique_ids(hass, entry.entry_id)
         assert "1|013001_sleep" not in unique_ids
         assert "1|013001_plasmacluster" in unique_ids
+        assert "1|013001_super_jet" in unique_ids
+        assert "rapid" not in _climate(hass, "1|013001").fan_modes
 
     pair.assert_awaited()
 
