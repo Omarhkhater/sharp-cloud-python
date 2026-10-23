@@ -3,10 +3,10 @@
   "name": "Sharp Air Egypt",
   "codeowners": ["@Omarhkhater"],
   "config_flow": true,
-  "documentation": "https://github.com/Omarhkhater/sharp-air-egypt-ha",
+  "documentation": "https://github.com/Omarhkhater/sharp-cloud-python",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/Omarhkhater/sharp-air-egypt-ha/issues",
+  "issue_tracker": "https://github.com/Omarhkhater/sharp-cloud-python/issues",
   "loggers": ["custom_components.sharp_cocoro_air"],
   "requirements": [],
   "version": "0.2.2"

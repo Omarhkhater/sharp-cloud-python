@@ -39,7 +39,7 @@ After updating, restart Home Assistant. You don't need to re-add the integration
 - Browser sign-in (no password stored), climate entity, outdoor temperature, power and energy sensors, Plasmacluster switch, fault and Super Jet (read-only) binary sensors.
 - Opt-in experimental controls (airflow, half degrees, Rapid, Sleep/Soft/Speed/Cocoro Air).
 
-[Unreleased]: https://github.com/Omarhkhater/sharp-air-egypt-ha/compare/v0.2.2...HEAD
-[0.2.2]: https://github.com/Omarhkhater/sharp-air-egypt-ha/releases/tag/v0.2.2
-[0.2.1]: https://github.com/Omarhkhater/sharp-air-egypt-ha/releases/tag/v0.2.1
-[0.2.0]: https://github.com/Omarhkhater/sharp-air-egypt-ha/releases/tag/v0.2.0
+[Unreleased]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.2
+[0.2.1]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.1
+[0.2.0]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.0

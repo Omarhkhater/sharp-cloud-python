@@ -6,8 +6,8 @@
 
 <p align="center">
   <a href="https://hacs.xyz/docs/faq/custom_repositories"><img src="https://img.shields.io/badge/HACS-Custom-41BDF5.svg" alt="HACS Custom"></a>
-  <a href="https://github.com/Omarhkhater/sharp-air-egypt-ha/releases"><img src="https://img.shields.io/github/v/release/Omarhkhater/sharp-air-egypt-ha" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Omarhkhater/sharp-air-egypt-ha" alt="License: MIT"></a>
+  <a href="https://github.com/Omarhkhater/sharp-cloud-python/releases"><img src="https://img.shields.io/github/v/release/Omarhkhater/sharp-cloud-python" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Omarhkhater/sharp-cloud-python" alt="License: MIT"></a>
 </p>
 
 Control the Sharp air conditioners you use with the **SHARP Air Control** app (Egypt) right from Home Assistant.
@@ -28,7 +28,7 @@ Airflow (vane) positions and half-degree steps are available behind **Configure 
 
 1. In Home Assistant, open **HACS**.
 2. Open the ⋮ menu and choose **Custom repositories**.
-3. Add `https://github.com/Omarhkhater/sharp-air-egypt-ha` as an **Integration**.
+3. Add `https://github.com/Omarhkhater/sharp-cloud-python` as an **Integration**.
 4. Search for **Sharp Air Egypt** and download it.
 5. Restart Home Assistant.
 
@@ -59,7 +59,7 @@ Tested on the **AY-XP12YHE** and **AY-XP18YHE**. Other Sharp ACs in the Egypt SH
 
 ## Help and issues
 
-Found a bug or tested a new model? [Open an issue](https://github.com/Omarhkhater/sharp-air-egypt-ha/issues). **Never post** passwords, cookies, tokens, sign-in or redirect URLs, or device IDs.
+Found a bug or tested a new model? [Open an issue](https://github.com/Omarhkhater/sharp-cloud-python/issues). **Never post** passwords, cookies, tokens, sign-in or redirect URLs, or device IDs.
 
 ## License
 
