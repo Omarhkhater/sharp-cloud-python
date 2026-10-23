@@ -1,17 +1,20 @@
 {
   "entity": {
-    "climate": {
-      "sharp_cocoro_air": {
-        "default": "mdi:air-conditioner"
-      }
-    },
     "sensor": {
-      "room_temperature": {
-        "default": "mdi:thermometer"
-      },
-      "room_humidity": {
-        "default": "mdi:water-percent"
-      }
+      "outdoor_temperature": {"default": "mdi:thermometer"},
+      "power": {"default": "mdi:flash"},
+      "energy": {"default": "mdi:lightning-bolt"}
+    },
+    "switch": {
+      "plasmacluster": {"default": "mdi:air-purifier"},
+      "sleep": {"default": "mdi:sleep"},
+      "soft": {"default": "mdi:weather-windy"},
+      "speed": {"default": "mdi:speedometer"},
+      "cocoro_air": {"default": "mdi:home-thermometer"}
+    },
+    "binary_sensor": {
+      "fault": {"default": "mdi:alert-circle"},
+      "super_jet": {"default": "mdi:weather-windy"}
     }
   }
 }

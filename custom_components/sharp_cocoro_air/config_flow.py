@@ -1,111 +1,139 @@
-"""Config flow for Sharp COCORO AIR."""
+"""Config flow. The password never enters Home Assistant.
+
+The user signs in with Azure AD B2C in a browser, lands on an address the
+browser cannot open, and pastes that address (or just the code) here.
+"""
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
+from typing import Any
+
 import voluptuous as vol
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.data_entry_flow import AbortFlow, FlowResult
 
-from homeassistant import config_entries
-from homeassistant.data_entry_flow import FlowResult
-
-from .sharp_cloud import SharpCloud
-
+from .client import (
+    Account,
+    SharpAPIError,
+    SharpAuthError,
+    SharpClient,
+    SharpConnectionError,
+    async_get_clientsession,
+)
 from .const import (
-    CONF_PASSWORD,
-    CONF_REFRESH_INTERVAL,
-    CONF_REGION,
-    CONF_USERNAME,
-    DEFAULT_REFRESH_INTERVAL,
-    DEFAULT_REGION,
+    CONF_COOKIES,
+    CONF_EXPERIMENTAL,
+    CONF_REDIRECT_URL,
+    CONF_TERMINAL_APP_ID,
+    CONF_USER_ID,
     DOMAIN,
 )
+from .protocol import authorize_url, extract_auth_code
+
+_LOGGER = logging.getLogger(__name__)
+
+_SCHEMA = vol.Schema({vol.Required(CONF_REDIRECT_URL): str})
 
 
-class SharpConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow."""
+class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Set up Sharp Air Control, or sign in again when the session dies."""
 
     VERSION = 1
 
-    async def async_step_user(
-        self,
-        user_input: dict | None = None,
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Ask for the browser redirect URL."""
+        return await self._async_auth_step(user_input)
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:
+        """Start a new browser sign-in for an existing entry."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
+        """Collect a fresh code and keep the same terminal."""
+        return await self._async_auth_step(user_input)
+
+    async def _async_auth_step(self, user_input: dict[str, Any] | None) -> FlowResult:
         errors: dict[str, str] = {}
-
         if user_input is not None:
-            try:
-                await self.async_set_unique_id(
-                    user_input[CONF_USERNAME].lower()
-                )
-                self._abort_if_unique_id_configured()
+            code = extract_auth_code(user_input[CONF_REDIRECT_URL])
+            if not code:
+                errors["base"] = "invalid_code"
+            else:
+                client = SharpClient(async_get_clientsession(self.hass))
+                try:
+                    if self.source == SOURCE_REAUTH:
+                        return await self._async_reauth(client, code)
+                    account = await self._async_new_account(client, code)
+                except AbortFlow:
+                    raise
+                except SharpAuthError:
+                    errors["base"] = "invalid_auth"
+                except (SharpConnectionError, SharpAPIError):
+                    errors["base"] = "cannot_connect"
+                except Exception:
+                    _LOGGER.exception("Unexpected error during Sharp sign-in")
+                    errors["base"] = "unknown"
+                else:
+                    return self.async_create_entry(
+                        title="Sharp Air Control",
+                        data=_entry_data(account),
+                    )
+                finally:
+                    client.release()
 
-                client = SharpCloud()
-
-                await self.hass.async_add_executor_job(
-                    client.login,
-                )
-
-                return self.async_create_entry(
-                    title=user_input[CONF_USERNAME],
-                    data=user_input,
-                )
-
-            except Exception:
-                errors["base"] = "cannot_connect"
-
+        step_id = "reauth_confirm" if self.source == SOURCE_REAUTH else "user"
         return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_USERNAME): str,
-                    vol.Required(CONF_PASSWORD): str,
-                    vol.Required(
-                        CONF_REGION,
-                        default=DEFAULT_REGION,
-                    ): str,
-                    vol.Required(
-                        CONF_REFRESH_INTERVAL,
-                        default=DEFAULT_REFRESH_INTERVAL,
-                    ): int,
-                }
-            ),
+            step_id=step_id,
+            data_schema=_SCHEMA,
+            description_placeholders={"authorize_url": authorize_url()},
             errors=errors,
         )
 
+    async def _async_new_account(self, client: SharpClient, code: str) -> Account:
+        """Exchange the code, and stop before pairing if this account exists."""
+        user_id = await client.exchange_code(code)
+        await self.async_set_unique_id(user_id)
+        self._abort_if_unique_id_configured()
+        return await client.finish_setup()
 
-class SharpOptionsFlow(config_entries.OptionsFlow):
-    """Sharp options."""
+    async def _async_reauth(self, client: SharpClient, code: str) -> FlowResult:
+        """Sign in again on the terminal this entry already registered."""
+        entry = self._get_reauth_entry()
+        client.terminal_app_id = entry.data.get(CONF_TERMINAL_APP_ID)
+        client.restore_cookies(entry.data.get(CONF_COOKIES) or [])
+        user_id = await client.refresh_with_code(code)
+        await self.async_set_unique_id(user_id)
+        self._abort_if_unique_id_mismatch()
+        account = await client.finish_setup(register=False)
+        return self.async_update_reload_and_abort(entry, data_updates=_entry_data(account))
 
-    def __init__(self, config_entry):
-        self.config_entry = config_entry
+    @staticmethod
+    def async_get_options_flow(config_entry: ConfigEntry) -> SharpOptionsFlow:
+        """Experimental FA-frame controls are off until the user enables them."""
+        return SharpOptionsFlow()
 
-    async def async_step_init(
-        self,
-        user_input=None,
-    ):
+
+class SharpOptionsFlow(OptionsFlow):
+    """One toggle for the FA-frame controls that were not confirmed live."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Ask whether to show half degrees, vanes, and the FA switches."""
         if user_input is not None:
-            return self.async_create_entry(
-                title="",
-                data=user_input,
-            )
-
+            return self.async_create_entry(title="", data=user_input)
+        enabled = bool(self.config_entry.options.get(CONF_EXPERIMENTAL, False))
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_REFRESH_INTERVAL,
-                        default=self.config_entry.options.get(
-                            CONF_REFRESH_INTERVAL,
-                            DEFAULT_REFRESH_INTERVAL,
-                        ),
-                    ): int,
-                }
-            ),
+            data_schema=vol.Schema({vol.Required(CONF_EXPERIMENTAL, default=enabled): bool}),
         )
 
 
-@staticmethod
-def async_get_options_flow(
-    config_entry,
-):
-    return SharpOptionsFlow(config_entry)
+def _entry_data(account: Account) -> dict[str, Any]:
+    return {
+        CONF_TERMINAL_APP_ID: account.terminal_app_id,
+        CONF_COOKIES: account.cookies,
+        CONF_USER_ID: account.user_id,
+    }

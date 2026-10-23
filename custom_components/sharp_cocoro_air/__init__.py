@@ -1,4 +1,4 @@
-"""The Sharp COCORO AIR integration."""
+"""Sharp Air Control (Egypt) for Home Assistant."""
 
 from __future__ import annotations
 
@@ -6,98 +6,44 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .sharp_cloud import SharpCloud
-from .sharp_cloud.auth.token import OAuthToken
-
-from .const import DOMAIN
+from .client import SharpClient, async_get_clientsession
+from .const import CONF_COOKIES, CONF_TERMINAL_APP_ID
 from .coordinator import SharpCoordinator
 
-PLATFORMS: list[Platform] = [
+PLATFORMS = [
     Platform.CLIMATE,
     Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.BINARY_SENSOR,
 ]
 
-
-async def async_setup(
-    hass: HomeAssistant,
-    config: dict,
-) -> bool:
-    """Set up the integration."""
-
-    hass.data.setdefault(DOMAIN, {})
-
-    return True
+type SharpConfigEntry = ConfigEntry[SharpCoordinator]
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-) -> bool:
-    """Set up Sharp COCORO AIR."""
-
-    client = SharpCloud()
-
-    token = entry.data.get("token")
-
-    if token:
-        client.auth.token = OAuthToken.from_dict(token)
-
-    coordinator = SharpCoordinator(
-        hass=hass,
-        client=client,
-    )
-
+async def async_setup_entry(hass: HomeAssistant, entry: SharpConfigEntry) -> bool:
+    """Connect with the stored session and start polling."""
+    session = async_get_clientsession(hass)
+    client = SharpClient(session, entry.data.get(CONF_TERMINAL_APP_ID))
+    client.restore_cookies(entry.data.get(CONF_COOKIES) or [])
+    coordinator = SharpCoordinator(hass, entry, client)
+    entry.runtime_data = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_reload_options))
     await coordinator.async_config_entry_first_refresh()
-
-    hass.data.setdefault(DOMAIN, {})
-
-    hass.data[DOMAIN][entry.entry_id] = {
-        "client": client,
-        "coordinator": coordinator,
-        "entry": entry,
-    }
-
-    await hass.config_entries.async_forward_entry_setups(
-        entry,
-        PLATFORMS,
-    )
-
-    entry.async_on_unload(
-        entry.add_update_listener(async_reload_entry)
-    )
-
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-) -> bool:
-    """Unload config entry."""
-
-    unload_ok = await hass.config_entries.async_unload_platforms(
-        entry,
-        PLATFORMS,
-    )
-
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
-
-    return unload_ok
+async def async_unload_entry(hass: HomeAssistant, entry: SharpConfigEntry) -> bool:
+    """Stop polling. Home Assistant closes the client session."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-async def async_reload_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-) -> None:
-    """Reload config entry."""
+async def _async_reload_options(hass: HomeAssistant, entry: SharpConfigEntry) -> None:
+    """Reload when the experimental toggle changes.
 
-    await async_unload_entry(
-        hass,
-        entry,
-    )
-
-    await async_setup_entry(
-        hass,
-        entry,
-    )
+    Cookie writes also update the entry. Those keep the same options, so they
+    must not reload.
+    """
+    if dict(entry.options) == entry.runtime_data.tracked_options:
+        return
+    await hass.config_entries.async_reload(entry.entry_id)

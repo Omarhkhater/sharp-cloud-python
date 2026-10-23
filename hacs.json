@@ -1,11 +1,6 @@
 {
-  "name": "Sharp COCORO AIR",
-  "country": [
-    "EG"
-  ],
+  "name": "Sharp Air Control",
+  "country": ["EG"],
   "homeassistant": "2025.1.0",
-  "render_readme": true,
-  "domains": [
-    "sharp_cocoro_air"
-  ]
+  "render_readme": true
 }
