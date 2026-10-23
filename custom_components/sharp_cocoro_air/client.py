@@ -43,6 +43,17 @@ class SharpAuthError(SharpError):
     """The session was rejected and terminal-only login did not recover it."""
 
 
+class SharpTerminalRefused(SharpAuthError):
+    """The stored terminal id itself was rejected.
+
+    A later poll cannot repair this. The caller should start reauth.
+    """
+
+    def __init__(self) -> None:
+        """Use a stable message. Callers match the type, not the text."""
+        super().__init__("terminal login refused")
+
+
 class SharpConnectionError(SharpError):
     """The cloud could not be reached."""
 
@@ -312,7 +323,7 @@ class SharpClient:
                 allow_reauth=False,
             )
         except SharpAuthError:
-            raise SharpAuthError("terminal login refused") from None
+            raise SharpTerminalRefused() from None
 
     async def register_terminal(self, name: str = "Home Assistant") -> None:
         """Register this terminal so later logins can use the terminal id alone."""

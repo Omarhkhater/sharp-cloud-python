@@ -21,7 +21,14 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .client import SharpAuthError, SharpBusy, SharpClient, SharpConnectionError, SharpError
+from .client import (
+    SharpAuthError,
+    SharpBusy,
+    SharpClient,
+    SharpConnectionError,
+    SharpError,
+    SharpTerminalRefused,
+)
 from .const import (
     CONF_COOKIES,
     CONF_EXPERIMENTAL,
@@ -40,6 +47,9 @@ _BUSY_RETRY_S = 10.0
 # Whole-degree setpoints are valueRange, not valueSingle. Both are one value.
 # valueBinary (FA) is never in this set.
 _SINGLE_VALUE_TYPES = {"valueSingle", "valueRange"}
+# Setup retries build a new coordinator. The count has to outlive that object
+# or a rejected session stays in setup-retry and never asks for reauth.
+_AUTH_FAILURES = f"{DOMAIN}_auth_failures"
 
 
 async def _pause(seconds: float) -> None:
@@ -89,9 +99,23 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         self._last_outdoor: dict[str, tuple[float, float]] = {}
         self._refresh_unsub = None
         self._closed = False
-        self._auth_failures = 0
+        self._auth_failures = self._stored_auth_failures()
         self.tracked_options = dict(entry.options)
         entry.async_on_unload(self._on_unload)
+
+    def _stored_auth_failures(self) -> int:
+        """Failures already counted for this entry, including earlier setups."""
+        counts: dict[str, int] = self.hass.data.setdefault(_AUTH_FAILURES, {})
+        return counts.get(self.entry.entry_id, 0)
+
+    def _set_auth_failures(self, count: int) -> None:
+        """Remember the streak on the entry so the next setup retry can see it."""
+        self._auth_failures = count
+        counts: dict[str, int] = self.hass.data.setdefault(_AUTH_FAILURES, {})
+        if count:
+            counts[self.entry.entry_id] = count
+        else:
+            counts.pop(self.entry.entry_id, None)
 
     @property
     def experimental(self) -> bool:
@@ -109,15 +133,15 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             try:
                 payload = await self.client.box_info()
             except SharpAuthError as err:
-                self._auth_failures += 1
+                self._set_auth_failures(self._auth_failures + 1)
                 # A refused terminal id will not recover on the next poll.
                 # Any other rejection is given two polls before reauth.
-                if str(err) == "terminal login refused" or self._auth_failures >= 3:
+                if isinstance(err, SharpTerminalRefused) or self._auth_failures >= 3:
                     raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
                 raise UpdateFailed("Sharp sign-in expired") from err
             except SharpError as err:
                 raise UpdateFailed("Could not reach the Sharp cloud") from err
-            self._auth_failures = 0
+            self._set_auth_failures(0)
             # One attempt per box per entry load, then at most once an hour.
             await self.client.pair_unlisted(payload)
             _box_ids, devices = split_box_info(payload)
@@ -130,8 +154,8 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
     def note_outdoor(self, key: str, value: float, updated_at: datetime | None = None) -> bool:
         """Remember a restored outdoor reading so a later off poll can hold it.
 
-        ``updated_at`` is the restored state's last report, or its last update
-        when that is missing. A reading that is already 6 hours old is not seeded.
+        ``updated_at`` is the restored state's last report. A reading that is
+        already 6 hours old is not seeded.
         """
         seen = _monotonic()
         if updated_at is not None:
@@ -203,11 +227,13 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                         result = await self._verify_or_resend(device, status, updates)
                 finally:
                     self._last_result_at[box_id] = _monotonic()
-        except SharpAuthError:
+        except SharpTerminalRefused:
             self.entry.async_start_reauth(self.hass)
             raise HomeAssistantError(
                 "Sharp sign-in expired. Open the integration and sign in again."
             ) from None
+        except SharpAuthError:
+            raise HomeAssistantError("Sharp sign-in expired") from None
         except SharpConnectionError:
             raise HomeAssistantError("Could not reach the Sharp cloud") from None
         except SharpError:
