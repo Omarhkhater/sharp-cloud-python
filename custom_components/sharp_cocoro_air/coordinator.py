@@ -25,6 +25,7 @@ from .const import (
     CONF_COOKIES,
     CONF_EXPERIMENTAL,
     DOMAIN,
+    OUTDOOR_HOLD_S,
     PENDING_GRACE_S,
     RETRY_EPCS,
     SCAN_INTERVAL,
@@ -84,6 +85,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         self._box_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_result_at: dict[str, float] = {}
         self._pending: dict[str, tuple[dict[str, Any], float]] = {}
+        self._last_outdoor: dict[str, tuple[float, float]] = {}
         self._refresh_unsub = None
         self._closed = False
         self.tracked_options = dict(entry.options)
@@ -111,10 +113,37 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             # One attempt per box per entry load, then at most once an hour.
             await self.client.pair_unlisted(payload)
             _box_ids, devices = split_box_info(payload)
+            devices = self._hold_outdoor(devices)
             self._persist_cookies()
             data = {device.unique_key: device for device in devices}
             self._overlay_pending(data)
             return data
+
+    def note_outdoor(self, key: str, value: float) -> None:
+        """Remember a restored outdoor reading so a later off poll can hold it."""
+        self._last_outdoor.setdefault(key, (value, _monotonic()))
+
+    def _hold_outdoor(self, devices: list[Aircon]) -> list[Aircon]:
+        """Keep the last outdoor temperature while the unit is off.
+
+        A fresh reading replaces the memory. 0x7E while the unit is on stays
+        unknown and does not count as a reading. The timestamp is not refreshed
+        by a held value, so the grace period still ends.
+        """
+        now = _monotonic()
+        held: list[Aircon] = []
+        for device in devices:
+            if device.outdoor_temp is not None:
+                self._last_outdoor[device.unique_key] = (device.outdoor_temp, now)
+                held.append(device)
+                continue
+            stored = self._last_outdoor.get(device.unique_key)
+            if device.power is False and stored is not None and now - stored[1] < OUTDOOR_HOLD_S:
+                value, _seen = stored
+                held.append(with_updates(device, outdoor_temp=value, outdoor_stale=True))
+                continue
+            held.append(device)
+        return held
 
     def _overlay_pending(self, data: dict[str, Aircon]) -> None:
         """Keep a write on screen until the poll shows it or the grace period ends."""

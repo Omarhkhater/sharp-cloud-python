@@ -1,6 +1,8 @@
 {
   "entity": {
     "sensor": {
+      "room_temperature": {"default": "mdi:home-thermometer"},
+      "humidity": {"default": "mdi:water-percent"},
       "outdoor_temperature": {"default": "mdi:thermometer"},
       "power": {"default": "mdi:flash"},
       "energy": {"default": "mdi:lightning-bolt"}

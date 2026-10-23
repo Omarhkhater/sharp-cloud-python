@@ -29,6 +29,9 @@ B2C_SCOPE = "openid offline_access"
 SCAN_INTERVAL = timedelta(seconds=60)
 # A box that rejects pairing is not tried again on the 60-second poll.
 PAIR_BACKOFF_SECONDS = 60 * 60
+# The outdoor coil is not measured while the indoor unit is off (BE = 0x7E).
+# Keep the last reading this long, then let the sensor go unknown.
+OUTDOOR_HOLD_S = 6 * 60 * 60
 
 # Rapid temperature taps collapse into one write. The unit keeps applying a
 # command for several seconds after controlResult, so the next write to the

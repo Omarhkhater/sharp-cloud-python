@@ -79,6 +79,12 @@
       }
     },
     "sensor": {
+      "room_temperature": {
+        "name": "Room temperature"
+      },
+      "humidity": {
+        "name": "Humidity"
+      },
       "outdoor_temperature": {
         "name": "Outdoor temperature"
       },

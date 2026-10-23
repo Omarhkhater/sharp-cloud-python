@@ -54,7 +54,9 @@ Each air conditioner:
 | Entity | What it does |
 |---|---|
 | Climate | On/off, mode (auto, cool, heat, dry, fan), whole-degree target temperature, room temperature, humidity, fan speed |
-| Outdoor temperature | EPC `BE` |
+| Room temperature | EPC `BB`. Its own sensor, and still shown on the climate entity. Valid while the unit is off |
+| Humidity | EPC `BA`. Its own sensor, and still shown on the climate entity. Valid while the unit is off |
+| Outdoor temperature | EPC `BE`. The unit does not measure this while it is off, so the sensor keeps the last value for 6 hours and marks it stale |
 | Power | Instantaneous watts, EPC `84` |
 | Energy | Cumulative kWh from EPC `85`, using the ECHONET scale of 0.001 kWh per count |
 | Plasmacluster | On/off, EPC `CF` |
@@ -71,7 +73,7 @@ The temperature slider runs from 16 °C to 30 °C. F0 names a per-model range ta
 
 Fan speeds are Auto, Quiet, Very weak, Weak, and Strong.
 
-The integration polls about every 60 seconds. A command updates the entity immediately, and status is read again about 15 seconds later. Rapid temperature taps are sent as one write.
+The integration polls about every 60 seconds. A command updates the entity immediately, and status is read again about 15 seconds later. Rapid temperature taps are sent as one write. Room temperature and humidity each have a sensor as well as the climate entity, and both stay valid while the unit is off. Outdoor temperature holds its last value for 6 hours while the unit is off, because the unit does not measure it then.
 
 ### Experimental controls
 

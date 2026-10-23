@@ -112,9 +112,9 @@ def test_raw_boxinfo_shape_parses_the_same_device(boxinfo):
 
 
 def test_invalid_sensor_bytes_are_unavailable():
-    """125/126 and the humidity sentinels are not real readings."""
+    """0x7E, 0x80, and the humidity sentinels are not real readings."""
     body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, 5])
-    for epc, value in ((0x80, 0x31), (0xB3, 22), (0xBA, 0xFD), (0xBB, 126), (0xBE, 125)):
+    for epc, value in ((0x80, 0x31), (0xB3, 22), (0xBA, 0xFD), (0xBB, 0x7E), (0xBE, 0x80)):
         body.extend((epc, 1, value))
     # Fix OPC: we wrote 5 properties. The header OPC was set to 5. Good.
     device = aircon_from_record(
@@ -135,6 +135,50 @@ def test_invalid_sensor_bytes_are_unavailable():
     assert device.humidity is None
     assert device.room_temp is None
     assert device.outdoor_temp is None
+
+
+def _sensor_device(props: dict[int, int]):
+    """One air conditioner built from single-byte EPCs."""
+    body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
+    for epc, value in props.items():
+        body.extend((epc, 1, value))
+    device = aircon_from_record(
+        "box-1",
+        {
+            "boxId": "box-1",
+            "deviceId": 1,
+            "echonetNode": "00-11-22-33-44-55",
+            "echonetObject": "013001",
+            "model": "AY-XP12YHE",
+            "echonetProperty": body.hex(),
+            "labelData": {"name": "Test", "deviceType": "AIR_CON"},
+        },
+    )
+    assert device is not None
+    return device
+
+
+def test_signed_room_and_outdoor_temperatures():
+    """0xF6 is -10 °C. 0x7E, 0x7F, and 0x80 are not readings."""
+    for epc, attr in ((0xBB, "room_temp"), (0xBE, "outdoor_temp")):
+        assert getattr(_sensor_device({epc: 0xF6}), attr) == -10
+        for raw in (0x7E, 0x7F, 0x80):
+            assert getattr(_sensor_device({epc: raw}), attr) is None
+        assert getattr(_sensor_device({epc: 0x7D}), attr) == 125
+
+
+def test_room_and_humidity_stay_while_off():
+    """Power off does not blank BB or BA. Humidity sentinels and a missing EPC do."""
+    on_off = _sensor_device({0x80: 0x31, 0xBB: 23, 0xBA: 40})
+    assert on_off.power is False
+    assert on_off.room_temp == 23
+    assert on_off.humidity == 40
+    for sentinel in (0xFD, 0xFE, 0xFF):
+        blank = _sensor_device({0x80: 0x31, 0xBB: 23, 0xBA: sentinel})
+        assert blank.room_temp == 23
+        assert blank.humidity is None
+    assert _sensor_device({0x80: 0x31, 0xBB: 23}).humidity is None
+    assert _sensor_device({0x80: 0x31, 0xBA: 40}).room_temp is None
 
 
 def test_fault_code_and_half_degree_frame():
