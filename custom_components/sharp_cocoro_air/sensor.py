@@ -1,17 +1,19 @@
-"""Outdoor temperature, instantaneous power, and cumulative energy."""
+"""Room and outdoor temperature, humidity, power, and cumulative energy."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy, UnitOfPower, UnitOfTemperature
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -31,6 +33,24 @@ class SharpSensorDescription(SensorEntityDescription):
 
 
 SENSORS: tuple[SharpSensorDescription, ...] = (
+    SharpSensorDescription(
+        key="room_temperature",
+        translation_key="room_temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_display_precision=0,
+        value_fn=lambda device: device.room_temp,
+    ),
+    SharpSensorDescription(
+        key="humidity",
+        translation_key="humidity",
+        device_class=SensorDeviceClass.HUMIDITY,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=PERCENTAGE,
+        suggested_display_precision=0,
+        value_fn=lambda device: device.humidity,
+    ),
     SharpSensorDescription(
         key="outdoor_temperature",
         translation_key="outdoor_temperature",
@@ -66,7 +86,7 @@ async def async_setup_entry(
     entry: SharpConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create the three sensors for each air conditioner."""
+    """Create the sensors for each air conditioner. None of them depend on power."""
     coordinator = entry.runtime_data
     seen: set[str] = set()
 
@@ -80,7 +100,10 @@ async def async_setup_entry(
                 if ident in seen:
                     continue
                 seen.add(ident)
-                fresh.append(SharpSensor(coordinator, key, description))
+                cls = (
+                    SharpOutdoorSensor if description.key == "outdoor_temperature" else SharpSensor
+                )
+                fresh.append(cls(coordinator, key, description))
         if fresh:
             async_add_entities(fresh)
 
@@ -132,3 +155,99 @@ class SharpSensor(CoordinatorEntity[SharpCoordinator], SensorEntity):
         if device is None:
             return None
         return self.entity_description.value_fn(device)
+
+
+class SharpOutdoorSensor(SharpSensor, RestoreSensor):
+    """Outdoor temperature. The last reading is kept while the unit is off.
+
+    A restart has no in-memory history. The restored value is used only when
+    the first poll has no outdoor reading and the unit is off. Availability
+    still follows the poll: a missing device is unavailable.
+    """
+
+    def __init__(
+        self,
+        coordinator: SharpCoordinator,
+        key: str,
+        description: SharpSensorDescription,
+    ) -> None:
+        """Bind the sensor and clear the restore flags."""
+        super().__init__(coordinator, key, description)
+        self._restored: float | None = None
+        self._restored_at: datetime | None = None
+        self._use_restore = False
+        self._decided = False
+
+    async def async_added_to_hass(self) -> None:
+        """Load the previous outdoor reading, then decide if this poll may use it."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        if (
+            last is not None
+            and isinstance(last.native_value, (int, float))
+            and not isinstance(last.native_value, bool)
+        ):
+            self._restored = float(last.native_value)
+        state = await self.async_get_last_state()
+        if state is not None:
+            self._restored_at = state.last_updated
+        self._accept_restore()
+
+    def _handle_coordinator_update(self) -> None:
+        """Use the restored reading for this update, then let the 6 hour hold run.
+
+        Clearing the fallback after the update means a later poll can expire.
+        Leaving it set kept the restored number on screen after the hold ended.
+        """
+        self._accept_restore()
+        super()._handle_coordinator_update()
+        if self._use_restore:
+            self._use_restore = False
+            self.async_write_ha_state()
+
+    def _accept_restore(self) -> None:
+        """Seed once: first poll is unknown and the unit is off."""
+        if self._decided or self._restored is None:
+            return
+        device = self._device
+        if device is None:
+            return
+        self._decided = True
+        if device.outdoor_temp is None and device.power is False:
+            self._use_restore = True
+            self.coordinator.note_outdoor(self._key, self._restored, self._restored_at)
+            return
+        self._restored = None
+
+    @property
+    def native_value(self) -> float | int | None:
+        """Poll value, or the restored reading for that first off poll."""
+        device = self._device
+        if device is None:
+            return None
+        if device.outdoor_temp is not None:
+            return device.outdoor_temp
+        if self._use_restore and device.power is False and self._restored is not None:
+            return self._restored
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, bool]:
+        """``stale`` is set only while the number is a held or restored reading."""
+        if self._holding:
+            return {"stale": True}
+        return {}
+
+    @property
+    def _holding(self) -> bool:
+        device = self._device
+        if device is None:
+            return False
+        if device.outdoor_stale:
+            return True
+        return bool(
+            device.outdoor_temp is None
+            and device.power is False
+            and self._use_restore
+            and self._restored is not None
+        )

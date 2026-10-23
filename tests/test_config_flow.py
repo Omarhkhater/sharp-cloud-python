@@ -60,7 +60,7 @@ async def test_user_flow_shows_the_authorize_url_and_stores_the_session(hass):
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Sharp Air Control"
+    assert result["title"] == "Sharp Air Egypt"
     assert result["data"]["terminal_app_id"] == ACCOUNT.terminal_app_id
     assert result["data"]["cookies"][0]["name"] == "JSESSIONID"
     assert result["data"]["user_id"] == "user-1"

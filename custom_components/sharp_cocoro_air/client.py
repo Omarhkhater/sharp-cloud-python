@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import string
 import time
@@ -29,6 +30,8 @@ from .protocol import (
 )
 
 _NONCE_ALPHABET = string.ascii_letters + string.digits
+_LOGGER = logging.getLogger(__name__)
+_BUSY_CODES = {"E1001001", "E1001002"}
 
 
 class SharpError(Exception):
@@ -46,13 +49,23 @@ class SharpConnectionError(SharpError):
 class SharpCommandRejected(SharpError):
     """deviceControl returned an id and controlResult was not success.
 
-    The write was accepted. The coordinator still reads status afterwards.
+    Kept so older callers can still recognise a rejected result. New control
+    flow returns the result word instead of raising this.
     """
 
     def __init__(self, result: str) -> None:
         """Remember the result word without putting it in the message."""
         super().__init__("The air conditioner rejected the command")
         self.result = result
+
+
+class SharpBusy(SharpError):
+    """The unit answered E1001001 or E1001002. One delayed retry is allowed."""
+
+    def __init__(self, code: str) -> None:
+        """Remember the busy code. It is not shown to the user."""
+        super().__init__("The air conditioner is busy")
+        self.code = code
 
 
 class SharpAPIError(SharpError):
@@ -118,6 +131,8 @@ class SharpClient:
         self.poll_interval = 1.0
         self.poll_attempts = 20
         self._pair_attempted: dict[str, float] = {}
+        self._auth_lock = asyncio.Lock()
+        self._auth_task: asyncio.Task[None] | None = None
 
     async def aclose(self) -> None:
         """Close a session this client owns. Do not use this for Home Assistant's session."""
@@ -229,7 +244,16 @@ class SharpClient:
         )
 
     async def login_with_terminal(self) -> None:
-        """Refresh the session with the terminal id and the current cookies."""
+        """Refresh the session. Concurrent callers share one in-flight login."""
+        async with self._auth_lock:
+            task = self._auth_task
+            if task is None or task.done():
+                task = asyncio.create_task(self._login_with_terminal())
+                self._auth_task = task
+        await task
+
+    async def _login_with_terminal(self) -> None:
+        """Post the terminal id. Caller holds the single-flight task, not the lock."""
         if not self.terminal_app_id:
             raise SharpAuthError("Sharp sign-in expired")
         await self._request(
@@ -366,8 +390,16 @@ class SharpClient:
             return False
         return box_lists_terminal(payload, box_id, self.terminal_app_id)
 
-    async def send_control(self, device: Aircon, status: list[dict]) -> None:
-        """Send a command. A 400 pairs the box only when this terminal is absent."""
+    async def send_control(self, device: Aircon, status: list[dict]) -> str:
+        """Send a command and return success, unmatch, error, or timeout.
+
+        A 400 pairs the box only when this terminal is absent. The log line
+        has EPC codes and the result, never a device id or box id.
+        An empty control is rejected here. The cloud answers that with E1004001.
+        """
+        if not status:
+            raise ValueError("A control needs at least one property")
+        started = time.monotonic()
         body = control_body(device.device_id, device.echonet_node, device.echonet_object, status)
         try:
             control_id = await self._device_control(device.box_id, body)
@@ -376,7 +408,15 @@ class SharpClient:
                 raise
             await self.pair(device.box_id)
             control_id = await self._device_control(device.box_id, body)
-        await self._poll_result(device.box_id, control_id)
+        result = await self._poll_result(device.box_id, control_id)
+        elapsed = time.monotonic() - started
+        _LOGGER.debug(
+            "control epcs=%s result=%s after %.1fs",
+            [item.get("statusCode") for item in status],
+            result,
+            elapsed,
+        )
+        return result
 
     async def _device_control(self, box_id: str, body: dict) -> str | int:
         if not self.terminal_app_id:
@@ -393,12 +433,17 @@ class SharpClient:
         item = items[0]
         error_code = item.get("errorCode")
         if error_code not in (None, "null", ""):
+            code = str(error_code)
+            _LOGGER.debug("deviceControl errorCode=%s", code)
+            if code in _BUSY_CODES:
+                raise SharpBusy(code)
             raise SharpError("The air conditioner rejected the command")
         if "id" not in item:
             raise SharpError("The air conditioner did not accept the command")
         return item["id"]
 
-    async def _poll_result(self, box_id: str, control_id: str | int) -> None:
+    async def _poll_result(self, box_id: str, control_id: str | int) -> str:
+        """Wait until controlResult settles. Unmatch is not an exception."""
         for _attempt in range(self.poll_attempts):
             _status, payload = await self._request(
                 "POST",
@@ -412,6 +457,10 @@ class SharpClient:
                 await asyncio.sleep(self.poll_interval)
                 continue
             if state == "success":
-                return
-            raise SharpCommandRejected(str(state))
-        raise SharpCommandRejected("timeout")
+                return "success"
+            if state == "unmatch":
+                return "unmatch"
+            if state == "timeout":
+                return "timeout"
+            return "error"
+        return "timeout"

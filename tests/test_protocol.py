@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -111,9 +112,9 @@ def test_raw_boxinfo_shape_parses_the_same_device(boxinfo):
 
 
 def test_invalid_sensor_bytes_are_unavailable():
-    """125/126 and the humidity sentinels are not real readings."""
+    """0x7E, 0x80, and the humidity sentinels are not real readings."""
     body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, 5])
-    for epc, value in ((0x80, 0x31), (0xB3, 22), (0xBA, 0xFD), (0xBB, 126), (0xBE, 125)):
+    for epc, value in ((0x80, 0x31), (0xB3, 22), (0xBA, 0xFD), (0xBB, 0x7E), (0xBE, 0x80)):
         body.extend((epc, 1, value))
     # Fix OPC: we wrote 5 properties. The header OPC was set to 5. Good.
     device = aircon_from_record(
@@ -134,6 +135,50 @@ def test_invalid_sensor_bytes_are_unavailable():
     assert device.humidity is None
     assert device.room_temp is None
     assert device.outdoor_temp is None
+
+
+def _sensor_device(props: dict[int, int]):
+    """One air conditioner built from single-byte EPCs."""
+    body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
+    for epc, value in props.items():
+        body.extend((epc, 1, value))
+    device = aircon_from_record(
+        "box-1",
+        {
+            "boxId": "box-1",
+            "deviceId": 1,
+            "echonetNode": "00-11-22-33-44-55",
+            "echonetObject": "013001",
+            "model": "AY-XP12YHE",
+            "echonetProperty": body.hex(),
+            "labelData": {"name": "Test", "deviceType": "AIR_CON"},
+        },
+    )
+    assert device is not None
+    return device
+
+
+def test_signed_room_and_outdoor_temperatures():
+    """0xF6 is -10 °C. 0x7E, 0x7F, and 0x80 are not readings."""
+    for epc, attr in ((0xBB, "room_temp"), (0xBE, "outdoor_temp")):
+        assert getattr(_sensor_device({epc: 0xF6}), attr) == -10
+        for raw in (0x7E, 0x7F, 0x80):
+            assert getattr(_sensor_device({epc: raw}), attr) is None
+        assert getattr(_sensor_device({epc: 0x7D}), attr) == 125
+
+
+def test_room_and_humidity_stay_while_off():
+    """Power off does not blank BB or BA. Humidity sentinels and a missing EPC do."""
+    on_off = _sensor_device({0x80: 0x31, 0xBB: 23, 0xBA: 40})
+    assert on_off.power is False
+    assert on_off.room_temp == 23
+    assert on_off.humidity == 40
+    for sentinel in (0xFD, 0xFE, 0xFF):
+        blank = _sensor_device({0x80: 0x31, 0xBB: 23, 0xBA: sentinel})
+        assert blank.room_temp == 23
+        assert blank.humidity is None
+    assert _sensor_device({0x80: 0x31, 0xBB: 23}).humidity is None
+    assert _sensor_device({0x80: 0x31, 0xBA: 40}).room_temp is None
 
 
 def test_fault_code_and_half_degree_frame():
@@ -162,6 +207,46 @@ def test_fault_code_and_half_degree_frame():
     assert device.fault is True
     assert device.caps.half_degree is True
     assert device.setpoint == 26.5
+
+
+def _half_degree_device(*, b3: int | None, fa_setpoint: int | None):
+    """One half-degree unit. ``fa_setpoint`` is the raw byte at index 26."""
+    props: list[tuple[int, bytes]] = []
+    capabilities = bytearray(32)
+    capabilities[8] = 0x10
+    props.append((0xF0, bytes(capabilities)))
+    if b3 is not None:
+        props.append((0xB3, bytes([b3])))
+    if fa_setpoint is not None:
+        frame = bytearray(80)
+        frame[26] = fa_setpoint
+        props.append((0xFA, bytes(frame)))
+    body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
+    for epc, edt in props:
+        body.append(epc)
+        body.append(len(edt))
+        body.extend(edt)
+    device = aircon_from_record(
+        "box-1",
+        {
+            "deviceId": 1,
+            "echonetNode": "00-11-22-33-44-55",
+            "echonetObject": "013001",
+            "echonetProperty": body.hex(),
+            "labelData": {"name": "Half", "deviceType": "AIR_CON"},
+        },
+    )
+    assert device is not None
+    return device
+
+
+def test_b3_setpoint_wins_when_the_fa_byte_lags():
+    """FA byte 26 can lag. B3 stays unless the FA temperature is within 0.5 °C."""
+    assert _half_degree_device(b3=21, fa_setpoint=52).setpoint == 21
+    assert _half_degree_device(b3=21, fa_setpoint=26).setpoint == 21
+    assert _half_degree_device(b3=21, fa_setpoint=43).setpoint == 21.5
+    assert _half_degree_device(b3=21, fa_setpoint=42).setpoint == 21
+    assert _half_degree_device(b3=None, fa_setpoint=0x35).setpoint == 26.5
 
 
 def test_empty_frame_and_half_degree_byte():
@@ -390,9 +475,37 @@ def test_package_metadata():
     ).read_text()
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["config_flow"] is True
-    assert manifest["version"]
+    assert manifest["version"] == "0.2.1"
+    assert manifest["name"] == "Sharp Air Egypt"
+    assert manifest["domain"] == "sharp_cocoro_air"
     assert "quality_scale" not in manifest
     assert "domains" not in hacs
+    assert hacs["name"] == "Sharp Air Egypt"
     assert strings == translations
+    assert "Sharp Air Egypt" in strings
     assert "Enable experimental controls" in strings
     assert "password" not in strings.lower()
+    assert hacs["homeassistant"] == "2025.1.0"
+    readme = (ROOT / "README.md").read_text()
+    assert "2026.3" in readme
+    assert "placeholder" in readme
+
+
+def test_brand_logo_is_the_supplied_png():
+    """The 512px logo is the supplied file, and the 256px icon is the same square."""
+    brand = ROOT / "custom_components" / "sharp_cocoro_air" / "brand"
+    original = (brand / "icon@2x.png").read_bytes()
+    assert (
+        hashlib.sha256(original).hexdigest()
+        == "07aa5d08d3fc91571e87a894f745b598f85cd7f4eb8171d2787ae12b9ff098c5"
+    )
+    assert (brand / "logo@2x.png").read_bytes() == original
+    assert _png_size(original) == (512, 512)
+    assert _png_size((brand / "icon.png").read_bytes()) == (256, 256)
+    assert _png_size((brand / "logo.png").read_bytes()) == (256, 256)
+
+
+def _png_size(data: bytes) -> tuple[int, int]:
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert data[12:16] == b"IHDR"
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")

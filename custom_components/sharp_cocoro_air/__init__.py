@@ -1,4 +1,4 @@
-"""Sharp Air Control (Egypt) for Home Assistant."""
+"""Sharp Air Egypt for Home Assistant."""
 
 from __future__ import annotations
 

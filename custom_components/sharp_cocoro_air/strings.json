@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Sharp Air Control",
+        "title": "Sharp Air Egypt",
         "description": "Sign in to SHARP Air Control in your browser, then paste the full address of the page that fails to load (or paste just the code).\n\n{authorize_url}\n\nThe page https://sharp-cocoroair-egypt will not open. Copy the address bar anyway. It looks like https://sharp-cocoroair-egypt/?code=...",
         "data": {
           "redirect_url": "Redirect URL or code"
@@ -31,7 +31,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "Sharp Air Control options",
+        "title": "Sharp Air Egypt options",
         "description": "Experimental controls send commands that were not confirmed on a live unit. Half-degree temperatures, vane positions, the Rapid fan speed, Sleep, Soft, Speed and Cocoro Air stay hidden while this is off. Rapid was rejected by a live unit.",
         "data": {
           "experimental_controls": "Enable experimental controls"
@@ -79,6 +79,12 @@
       }
     },
     "sensor": {
+      "room_temperature": {
+        "name": "Room temperature"
+      },
+      "humidity": {
+        "name": "Humidity"
+      },
       "outdoor_temperature": {
         "name": "Outdoor temperature"
       },

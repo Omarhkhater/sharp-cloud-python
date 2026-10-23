@@ -50,8 +50,9 @@ _FAN_BY_CODE = {code: name for name, code in FAN_MODES}
 _VANE_V_BY_CODE = {code.upper(): name for name, code in VANE_VERTICAL}
 _VANE_H_BY_CODE = {code.upper(): name for name, code in VANE_HORIZONTAL}
 
-# Room and outdoor temperatures use these bytes for "no reading".
-_INVALID_TEMPS = {0x7D, 0x7E, 0x7F, 0x81, 0xFD, 0xFE, 0xFF}
+# BB and BE. 0x7E, 0x7F, and 0x80 mean the unit has no reading.
+# Other bytes are signed: 0xF6 is -10 °C.
+_INVALID_TEMPS = {0x7E, 0x7F, 0x80}
 _INVALID_HUMIDITY = {0xFD, 0xFE, 0xFF}
 
 
@@ -284,6 +285,8 @@ class Aircon:
     room_temp: float | None = None
     humidity: int | None = None
     outdoor_temp: float | None = None
+    # True while outdoor_temp is the last real reading, held because the unit is off.
+    outdoor_stale: bool = False
     fan: str | None = None
     vane_vertical: str | None = None
     vane_horizontal: str | None = None
@@ -370,8 +373,11 @@ def parse_echonet_property(hex_text: str) -> dict[int, bytes]:
 
 
 def _temp_byte(value: int) -> float | None:
-    if value in _INVALID_TEMPS or value >= 0x7D:
+    """Decode one BB or BE byte. Negative temperatures are raw - 256."""
+    if value in _INVALID_TEMPS:
         return None
+    if value >= 0x80:
+        return float(value - 256)
     return float(value)
 
 
@@ -426,7 +432,8 @@ def aircon_from_parts(
         half_byte = fa_byte(FA_SETPOINT)
         if half_byte is not None:
             half = half_byte / 2
-            if 10 <= half <= 40:
+            # FA byte 26 can lag behind B3. Keep B3 unless FA agrees within 0.5 °C.
+            if 10 <= half <= 40 and (setpoint is None or abs(half - setpoint) <= 0.5):
                 setpoint = half
 
     humidity: int | None = None
@@ -637,6 +644,7 @@ def device_diagnostics(device: Aircon) -> dict:
         "room_temp": device.room_temp,
         "humidity": device.humidity,
         "outdoor_temp": device.outdoor_temp,
+        "outdoor_stale": device.outdoor_stale,
         "fan": device.fan,
         "vane_vertical": device.vane_vertical,
         "vane_horizontal": device.vane_horizontal,
