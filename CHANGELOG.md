@@ -2,13 +2,23 @@
 
 All notable changes to Sharp Air Egypt are listed here. Versions follow the GitHub releases.
 
-## [Unreleased] – v0.3.0 (planned, pending live testing)
+## [0.3.0] - 2026-10-24
 
-> Nothing below is released yet. It depends on the maintainer's live tests.
+### Added
+- Airflow controls (vertical and horizontal vane positions and swing) and half-degree temperature steps are on by default. Verified on the AY-XP12YHE.
 
-- Planned: vertical and horizontal airflow and half-degree steps become standard controls, on by default.
-- Planned: Rapid fan speed hidden on units that don't support it. Speed switch removed. Sleep switch probably removed.
-- Planned: "Enable experimental controls" becomes **Show untested controls** (Soft and Cocoro Air only).
+### Changed
+- **Enable experimental controls** is now **Show untested controls**, and it covers Soft and Cocoro Air only.
+- A write is confirmed by reading the air conditioner's status back.
+
+### Removed
+- The Sleep and Speed switches.
+- Rapid is hidden on units that don't have it.
+
+### Fixed
+- A sign-in failure while sending a command asks you to sign in again only when Sharp refuses the saved terminal. Any other sign-in error does not.
+- The sign-in failure count is reset when that prompt starts, when sign-in finishes, and when the integration is reloaded, so one failed poll after a reload does not ask you to sign in again.
+- A half-degree temperature that crosses a whole degree is sent as the whole degree first, then the half degree. A status byte that is still on the previous degree is not treated as the new temperature.
 
 ## [0.2.2] – 2026-10-24
 
@@ -39,7 +49,7 @@ After updating, restart Home Assistant. You don't need to re-add the integration
 - Browser sign-in (no password stored), climate entity, outdoor temperature, power and energy sensors, Plasmacluster switch, fault and Super Jet (read-only) binary sensors.
 - Opt-in experimental controls (airflow, half degrees, Rapid, Sleep/Soft/Speed/Cocoro Air).
 
-[Unreleased]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.2.2...HEAD
+[0.3.0]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.0

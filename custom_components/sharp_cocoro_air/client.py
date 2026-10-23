@@ -19,6 +19,7 @@ from http.cookies import SimpleCookie
 
 import aiohttp
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from yarl import URL
 
@@ -28,6 +29,7 @@ from .protocol import (
     box_lists_terminal,
     boxes_missing_terminal,
     control_body,
+    fa_payload_is_blank,
 )
 
 _NONCE_ALPHABET = string.ascii_letters + string.digits
@@ -35,13 +37,19 @@ _LOGGER = logging.getLogger(__name__)
 _BUSY_CODES = {"E1001001", "E1001002"}
 
 
+_EMPTY_PAYLOAD = (
+    "Sharp would reject that command because its payload is empty. "
+    "Wait for a status reading and try again."
+)
+
+
 def _fa_frame_is_blank(status: list[dict]) -> bool:
-    """True when an FA payload is all zeros. The cloud answers that with E1004001."""
+    """True when an FA payload, ignoring the checksum and change map, is all zeros."""
     for prop in status:
         if prop.get("valueType") != "valueBinary":
             continue
         code = str((prop.get("valueBinary") or {}).get("code") or "")
-        if code and set(code.lower()) <= {"0"}:
+        if fa_payload_is_blank(code):
             return True
     return False
 
@@ -472,7 +480,7 @@ class SharpClient:
         if not status:
             raise ValueError("A control needs at least one property")
         if _fa_frame_is_blank(status):
-            raise ValueError("An empty FA frame is rejected by the cloud")
+            raise HomeAssistantError(_EMPTY_PAYLOAD)
         started = time.monotonic()
         body = control_body(device.device_id, device.echonet_node, device.echonet_object, status)
         try:

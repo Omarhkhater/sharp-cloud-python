@@ -30,6 +30,7 @@ from .const import (
     CONF_USER_ID,
     DOMAIN,
 )
+from .coordinator import clear_auth_failures
 from .protocol import authorize_url, extract_auth_code
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:
         """Start a new browser sign-in for an existing entry."""
+        clear_auth_failures(self.hass, self._get_reauth_entry().entry_id)
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -110,6 +112,7 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(user_id)
         self._abort_if_unique_id_mismatch()
         account = await client.finish_setup(register=False)
+        clear_auth_failures(self.hass, entry.entry_id)
         return self.async_update_reload_and_abort(entry, data_updates=_entry_data(account))
 
     @staticmethod

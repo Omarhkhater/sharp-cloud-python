@@ -21,10 +21,12 @@ from custom_components.sharp_cocoro_air.protocol import (
     cmd_power,
     cmd_setpoint,
     cmd_sleep,
+    cmd_soft,
     cmd_vanes,
     control_body,
     device_diagnostics,
     extract_auth_code,
+    fa_payload_is_blank,
     parse_capabilities,
     parse_echonet_property,
     split_box_info,
@@ -60,11 +62,12 @@ def test_fixture_matches_the_live_decode(boxinfo):
     assert living.energy_kwh == pytest.approx(2367.458)
     assert living.fault is False
     assert living.caps.half_degree is True
-    assert living.caps.vertical_vanes[0] == "auto"
-    assert "down" in living.caps.vertical_vanes
+    assert living.caps.vertical_vanes == ("auto", "up", "horizontal", "down", "swing")
+    assert "down1" not in living.caps.vertical_vanes
     assert living.caps.horizontal_vanes == ("straight", "left", "right", "swing")
     assert "wide" not in living.caps.horizontal_vanes
     assert "auto" not in living.caps.horizontal_vanes
+    assert living.caps.rapid is True
     assert living.caps.soft is False
     assert living.caps.speed is False
     assert living.caps.cocoro is False
@@ -248,12 +251,15 @@ def _half_degree_device(*, b3: int | None, fa_setpoint: int | None):
 
 
 def test_b3_setpoint_wins_when_the_fa_byte_lags():
-    """FA byte 26 can lag. B3 stays unless the FA temperature is within 0.5 °C."""
+    """FA byte 26 is used only when it is B3, or at most 0.5 °C above B3."""
     assert _half_degree_device(b3=21, fa_setpoint=52).setpoint == 21
     assert _half_degree_device(b3=21, fa_setpoint=26).setpoint == 21
     assert _half_degree_device(b3=21, fa_setpoint=43).setpoint == 21.5
     assert _half_degree_device(b3=21, fa_setpoint=42).setpoint == 21
     assert _half_degree_device(b3=None, fa_setpoint=0x35).setpoint == 26.5
+    # B3 has already moved to 22. A byte still showing 21.5 must not win.
+    assert _half_degree_device(b3=22, fa_setpoint=43).setpoint == 22
+    assert _half_degree_device(b3=21, fa_setpoint=44).setpoint == 21
 
 
 def test_empty_frame_and_half_degree_byte():
@@ -303,28 +309,83 @@ def test_half_degree_setpoint_uses_the_fa_frame_only():
         cmd_setpoint(26.5, half_degree=False, frame_end=80)
 
 
-def test_horizontal_modes_follow_the_capability_bytes():
-    """Bytes 10-12 select straight, left, and right. Swing is added. Wide is not."""
+def test_vane_lists_follow_the_capability_patterns():
+    """Byte 10 is the vertical pattern and byte 11 is the horizontal pattern.
+
+    Byte 12 is the fan pattern. It is not a horizontal position, even when it
+    is 0x03 (right, if it were read as a position code).
+    """
     listed = bytearray(32)
     listed[10] = 0x01
     listed[11] = 0x02
     listed[12] = 0x03
     caps = parse_capabilities(bytes(listed))
     assert caps.horizontal_vanes == ("straight", "left", "right", "swing")
-    assert caps.vertical_vanes
+    assert caps.vertical_vanes == ("auto", "up", "horizontal", "down", "swing")
+    assert caps.rapid is True
 
-    only_straight = bytearray(32)
-    only_straight[10] = 0x01
-    assert parse_capabilities(bytes(only_straight)).horizontal_vanes == ("straight", "swing")
+    narrow = bytearray(32)
+    narrow[11] = 0x01
+    assert parse_capabilities(bytes(narrow)).horizontal_vanes == ("straight", "swing")
+    assert parse_capabilities(bytes(narrow)).vertical_vanes == ()
 
-    wide = bytearray(32)
-    wide[10] = 0x07
-    wide[11] = 0x0A
-    wide[12] = 0x08
-    assert parse_capabilities(bytes(wide)).horizontal_vanes == ()
+    wider = bytearray(32)
+    wider[10] = 0x02
+    wider[11] = 0x03
+    wider[12] = 0x01
+    wider_caps = parse_capabilities(bytes(wider))
+    assert wider_caps.vertical_vanes[0] == "auto"
+    assert "down1" in wider_caps.vertical_vanes
+    assert "wide" in wider_caps.horizontal_vanes
+    assert "auto" in wider_caps.horizontal_vanes
+    assert wider_caps.rapid is False
 
+    hidden = bytearray(32)
+    hidden[29] = 0x38
+    assert parse_capabilities(bytes(hidden)).rapid is False
     assert parse_capabilities(bytes(16)).horizontal_vanes == ()
+    assert parse_capabilities(bytes(16)).vertical_vanes == ()
     assert Capabilities().horizontal_vanes == ()
+
+
+def test_cocoro_needs_both_capability_bits():
+    """Cocoro is present only when both bits of 0x06 are set."""
+    one_bit = bytearray(16)
+    one_bit[8] = 0x02
+    assert parse_capabilities(bytes(one_bit)).cocoro is False
+    one_bit[8] = 0x04
+    assert parse_capabilities(bytes(one_bit)).cocoro is False
+    one_bit[8] = 0x06
+    assert parse_capabilities(bytes(one_bit)).cocoro is True
+    one_bit[8] = 0x96
+    assert parse_capabilities(bytes(one_bit)).cocoro is True
+
+
+def test_off_commands_copy_the_current_status_into_the_payload():
+    """Soft off and vertical auto are byte 00. The rest of the payload is not."""
+    current = bytearray(80)
+    current[26] = 0x2A
+    soft_off = cmd_soft(False, 80)[0]["valueBinary"]["code"]
+    filled = cmd_soft(False, 80, bytes(current))[0]["valueBinary"]["code"]
+    assert set(soft_off.lower()) - {"0"}
+    assert fa_payload_is_blank(soft_off)
+    assert not fa_payload_is_blank(filled)
+    assert soft_off[4:32] == filled[4:32]
+    raw = bytes.fromhex(filled)
+    assert raw[41] == 0x00
+    assert raw[26] == 0x2A
+
+    auto = cmd_vanes(vertical="auto", horizontal=None, frame_end=80)[0]["valueBinary"]["code"]
+    copied = cmd_vanes(
+        vertical="auto",
+        horizontal=None,
+        frame_end=80,
+        current=bytes(current),
+    )[0]["valueBinary"]["code"]
+    assert fa_payload_is_blank(auto)
+    assert not fa_payload_is_blank(copied)
+    assert bytes.fromhex(copied)[26] == 0x2A
+    assert not fa_payload_is_blank(cmd_soft(True, 80)[0]["valueBinary"]["code"])
 
 
 def test_vane_indexes_follow_the_fixture_not_section_42(boxinfo):
@@ -526,6 +587,13 @@ def test_package_metadata():
     assert "sharp-air-egypt-ha" not in readme
     assert "sharp-air-egypt-ha" not in changelog
     assert 'version = "0.3.0"' in (ROOT / "pyproject.toml").read_text()
+    assert (
+        "Airflow controls (vertical and horizontal vane positions and swing) "
+        "and half-degree temperature steps are on by default."
+    ) in readme
+    assert "Enable experimental controls" not in readme
+    assert "## [0.3.0] - 2026-10-24" in changelog
+    assert "placeholder" not in readme.lower()
 
 
 def test_brand_logo_is_the_supplied_png():

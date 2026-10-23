@@ -22,7 +22,7 @@ Each indoor unit shows up as its own device with:
 - **Plasmacluster** on/off switch
 - **Status:** Super Jet and fault indicators
 
-Airflow (vane) positions and half-degree steps are available behind **Configure → Enable experimental controls**. They're off by default.
+Airflow controls (vertical and horizontal vane positions and swing) and half-degree temperature steps are on by default. Soft and Cocoro Air stay behind **Configure → Show untested controls**.
 
 ## Install (HACS)
 

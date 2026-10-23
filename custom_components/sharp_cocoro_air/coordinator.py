@@ -49,9 +49,12 @@ _BUSY_RETRY_S = 10.0
 # Whole-degree setpoints are valueRange, not valueSingle. Both are one value.
 # valueBinary (FA) is never in this set.
 _SINGLE_VALUE_TYPES = {"valueSingle", "valueRange"}
-# Setup retries build a new coordinator. The count has to outlive that object
-# or a rejected session stays in setup-retry and never asks for reauth.
+# Setup retries build a new coordinator and unload the failed attempt, but they
+# do not call async_unload_entry. The count has to outlive that object.
+# A real unload, and the moment reauth starts or finishes, clears it so one
+# rejected poll after a reload does not go straight back to reauth.
 _AUTH_FAILURES = f"{DOMAIN}_auth_failures"
+_UNCONFIRMED = "The change couldn't be confirmed"
 
 
 async def _pause(seconds: float) -> None:
@@ -83,6 +86,13 @@ def _is_fa(status: list[dict]) -> bool:
         str(prop.get("statusCode", "")).lower() == "fa" and prop.get("valueType") == "valueBinary"
         for prop in status
     )
+
+
+def clear_auth_failures(hass: HomeAssistant, entry_id: str) -> None:
+    """Forget the stored sign-in failure count for one config entry."""
+    counts: dict[str, int] | None = hass.data.get(_AUTH_FAILURES)
+    if counts:
+        counts.pop(entry_id, None)
 
 
 def _matches(device: Aircon, updates: dict[str, Any]) -> bool:
@@ -149,6 +159,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                 # A refused terminal id will not recover on the next poll.
                 # Any other rejection is given two polls before reauth.
                 if isinstance(err, SharpTerminalRefused) or self._auth_failures >= 3:
+                    self._set_auth_failures(0)
                     raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
                 raise UpdateFailed("Sharp sign-in expired") from err
             except SharpError as err:
@@ -227,6 +238,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             raise HomeAssistantError("That air conditioner is not available")
         device = self.data[key]
         box_id = device.box_id
+        confirm_failed = False
         try:
             async with self._box_locks[box_id]:
                 try:
@@ -237,12 +249,17 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                         await _pause(_BUSY_RETRY_S)
                         result = await self.client.send_control(device, status)
                     if result == "unmatch" and _is_fa(status):
-                        result = await self._confirm_fa(device, updates)
+                        try:
+                            result = await self._confirm_fa(device, updates)
+                        except SharpError:
+                            confirm_failed = True
+                            raise
                     elif result == "unmatch" and _can_retry(status):
                         result = await self._verify_or_resend(device, status, updates)
                 finally:
                     self._last_result_at[box_id] = _monotonic()
         except SharpTerminalRefused:
+            self._set_auth_failures(0)
             self.entry.async_start_reauth(self.hass)
             raise HomeAssistantError(
                 "Sharp sign-in expired. Open the integration and sign in again."
@@ -250,14 +267,22 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         except SharpAuthError:
             raise HomeAssistantError("Sharp sign-in expired") from None
         except SharpConnectionError:
+            if confirm_failed:
+                self._schedule_status_refresh()
+                raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError("Could not reach the Sharp cloud") from None
         except SharpError:
+            if confirm_failed:
+                self._schedule_status_refresh()
+                raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError("The air conditioner rejected the command") from None
 
         if result in ("success", "verified"):
             self._apply_optimistic(key, updates)
         self._schedule_status_refresh()
         if result not in ("success", "verified"):
+            if _is_fa(status):
+                raise HomeAssistantError(_UNCONFIRMED)
             raise HomeAssistantError("The air conditioner rejected the command")
 
     async def _wait_settle(self, box_id: str) -> None:

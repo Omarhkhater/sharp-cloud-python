@@ -16,7 +16,7 @@ from homeassistant.components.climate import (
 )
 from homeassistant.const import PRECISION_HALVES, PRECISION_WHOLE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
@@ -47,6 +47,7 @@ from .protocol import (
     cmd_power,
     cmd_setpoint,
     cmd_vanes,
+    fa_payload_is_blank,
     mode_has_setpoint,
 )
 
@@ -72,6 +73,12 @@ def _known_vane(name: str | None) -> str | None:
 def snap_whole_degree(temperature: float) -> float:
     """Nearest whole degree. Halves round up, including 22.5."""
     return float(math.floor(temperature + 0.5))
+
+
+def _is_half_step(temperature: float) -> bool:
+    """True for 21.5, false for 21 or 22."""
+    doubled = round(temperature * 2)
+    return abs(temperature * 2 - doubled) < 1e-6 and doubled % 2 == 1
 
 
 async def async_setup_entry(
@@ -233,7 +240,7 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         """Fan speeds. Rapid is included only when the capability byte lists it."""
         modes = [name for name, _code in FAN_MODES if name != FAN_RAPID]
         device = self._device
-        if device is not None and device.caps.a04:
+        if device is not None and device.caps.rapid:
             modes.append(FAN_RAPID)
         return modes
 
@@ -302,6 +309,19 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             return
         half_degree = device.caps.half_degree
         try:
+            if half_degree and _is_half_step(target):
+                whole = math.floor(target + 1e-9)
+                current = device.setpoint
+                crosses = current is None or math.floor(current + 1e-9) != whole
+                if crosses:
+                    # The unit keeps the whole degree in B3. Send that first,
+                    # then the half-degree byte, or a lagging FA byte is wrong.
+                    await self.coordinator.async_send(
+                        self._key,
+                        cmd_setpoint(float(whole), half_degree=True, frame_end=device.frame_end),
+                        setpoint=float(whole),
+                    )
+                    device = self._device or device
             status = cmd_setpoint(target, half_degree=half_degree, frame_end=device.frame_end)
             await self.coordinator.async_send(self._key, status, setpoint=target)
         except (HomeAssistantError, ValueError) as err:
@@ -339,7 +359,7 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set the fan speed. Rapid is sent only when the unit lists that speed."""
         device = self._device
-        if fan_mode == FAN_RAPID and (device is None or not device.caps.a04):
+        if fan_mode == FAN_RAPID and (device is None or not device.caps.rapid):
             return
         await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
 
@@ -359,9 +379,9 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         if device is None:
             return
         if vertical is not None and vertical not in device.caps.vertical_vanes:
-            return
+            raise ServiceValidationError("This air conditioner does not support that vane position")
         if horizontal is not None and horizontal not in device.caps.horizontal_vanes:
-            return
+            raise ServiceValidationError("This air conditioner does not support that vane position")
         sent_vertical = vertical if vertical is not None else _known_vane(device.vane_vertical)
         sent_horizontal = (
             horizontal if horizontal is not None else _known_vane(device.vane_horizontal)
@@ -372,7 +392,14 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             vertical=sent_vertical,
             horizontal=sent_horizontal,
             frame_end=device.frame_end,
+            current=device.fa_frame,
         )
+        code = str(status[0]["valueBinary"]["code"])
+        if fa_payload_is_blank(code):
+            raise HomeAssistantError(
+                "Sharp would reject that command because its payload is empty. "
+                "Wait for a status reading and try again."
+            )
         updates: dict[str, str] = {}
         if sent_vertical is not None:
             updates["vane_vertical"] = sent_vertical

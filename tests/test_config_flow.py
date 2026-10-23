@@ -17,6 +17,7 @@ from custom_components.sharp_cocoro_air.client import (
     SharpConnectionError,
 )
 from custom_components.sharp_cocoro_air.const import DOMAIN, HMS_API
+from custom_components.sharp_cocoro_air.coordinator import _AUTH_FAILURES
 
 ACCOUNT = Account(
     user_id="user-1",
@@ -128,6 +129,7 @@ async def test_reauth_updates_cookies_without_a_new_account(hass):
         },
     )
     entry.add_to_hass(hass)
+    hass.data[_AUTH_FAILURES] = {entry.entry_id: 2}
     refreshed = Account(
         user_id="user-1",
         terminal_app_id="https://example.invalid/terminal/1",
@@ -165,6 +167,7 @@ async def test_reauth_updates_cookies_without_a_new_account(hass):
         )
         assert result["type"] is FlowResultType.FORM
         assert result["step_id"] == "reauth_confirm"
+        assert entry.entry_id not in hass.data[_AUTH_FAILURES]
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             {"redirect_url": "https://sharp-cocoroair-egypt/?code=fresh"},

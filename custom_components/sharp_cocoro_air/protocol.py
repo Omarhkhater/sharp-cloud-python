@@ -34,7 +34,6 @@ from .const import (
     POWER_OFF,
     POWER_ON,
     VANE_HORIZONTAL,
-    VANE_HORIZONTAL_OFFERED,
     VANE_VERTICAL,
 )
 
@@ -50,9 +49,14 @@ _MODE_BY_CODE = {code: name for name, code in MODES}
 _FAN_BY_CODE = {code: name for name, code in FAN_MODES}
 _VANE_V_BY_CODE = {code.upper(): name for name, code in VANE_VERTICAL}
 _VANE_H_BY_CODE = {code.upper(): name for name, code in VANE_HORIZONTAL}
-_VERTICAL_MODES = tuple(name for name, _code in VANE_VERTICAL)
-# F0 bytes 10, 11, and 12 are the horizontal positions this model lists.
-_HORIZONTAL_CAPABILITY_OFFSETS = (10, 11, 12)
+# F0 byte 10 is the app's vertical pattern (E2.f.y), not a list of position codes.
+# 1 is the five positions these units have. 2 and above add the extra down steps.
+_VERTICAL_BASIC = ("auto", "up", "horizontal", "down", "swing")
+_VERTICAL_ALL = tuple(name for name, _code in VANE_VERTICAL)
+# F0 byte 11 is the horizontal pattern (E2.f.x). Byte 12 is the fan pattern.
+_HORIZONTAL_NARROW = ("straight", "swing")
+_HORIZONTAL_STANDARD = ("straight", "left", "right", "swing")
+_HORIZONTAL_ALL = tuple(name for name, _code in VANE_HORIZONTAL)
 
 # BB and BE. 0x7E, 0x7F, and 0x80 mean the unit has no reading.
 # Other bytes are signed: 0xF6 is -10 °C.
@@ -134,6 +138,16 @@ class ControlFrame:
         self.start = 17
         self.end = end_index
         self.items: dict[int, str] = {}
+        # Current status bytes. They keep the payload from being all zeros
+        # without marking those indexes as changes.
+        self.base: dict[int, str] = {}
+
+    def fill(self, frame: bytes) -> ControlFrame:
+        """Copy a status frame into the payload. Change bits stay on ``set``."""
+        limit = min(len(frame), self.end)
+        for index in range(self.start, limit + 1):
+            self.base[index] = f"{frame[index - 1]:02x}"
+        return self
 
     def set(self, index: int, byte_hex: str) -> ControlFrame:
         """Mark one byte as changing."""
@@ -148,7 +162,9 @@ class ControlFrame:
             if position is not None:
                 bits[position - 1] = "1"
         bitmap = "".join(f"{int(''.join(bits[i : i + 4]), 2):x}" for i in range(0, len(bits), 4))
-        data = "".join(self.items.get(i, "00") for i in range(self.start, self.end + 1))
+        data = "".join(
+            self.items.get(i, self.base.get(i, "00")) for i in range(self.start, self.end + 1)
+        )
         body = "00" + bitmap + data
         checksum = sum(int(body[i : i + 2], 16) for i in range(0, len(body), 2)) % 256
         return f"{checksum:02x}{body}"
@@ -200,9 +216,16 @@ def cmd_vanes(
     vertical: str | None,
     horizontal: str | None,
     frame_end: int,
+    current: bytes | None = None,
 ) -> list[dict]:
-    """Set vertical and/or horizontal vanes. Unset vanes are left alone."""
+    """Set vertical and/or horizontal vanes. Unset vanes are left alone.
+
+    ``current`` is the unit's FA status. A vertical auto write is the byte
+    ``00``, so without that status the payload would be all zeros.
+    """
     frame = ControlFrame(frame_end)
+    if current:
+        frame.fill(current)
     if vertical is not None:
         frame.set(FA_VANE_VERTICAL, dict(VANE_VERTICAL)[vertical])
     if horizontal is not None:
@@ -215,29 +238,50 @@ def cmd_plasmacluster(on: bool) -> list[dict]:
     return [prop_single(0xCF, PLASMACLUSTER_ON if on else PLASMACLUSTER_OFF)]
 
 
-def _cmd_flag(index: int, on: bool, frame_end: int) -> list[dict]:
-    frame = ControlFrame(frame_end).set(index, "01" if on else "00")
+def _cmd_flag(
+    index: int,
+    on: bool,
+    frame_end: int,
+    current: bytes | None = None,
+) -> list[dict]:
+    frame = ControlFrame(frame_end)
+    if current:
+        frame.fill(current)
+    frame.set(index, "01" if on else "00")
     return [prop_binary(0xFA, frame.encode())]
 
 
-def cmd_sleep(on: bool, frame_end: int) -> list[dict]:
+def cmd_sleep(on: bool, frame_end: int, current: bytes | None = None) -> list[dict]:
     """Sleep flag in the FA frame."""
-    return _cmd_flag(FA_SLEEP, on, frame_end)
+    return _cmd_flag(FA_SLEEP, on, frame_end, current)
 
 
-def cmd_soft(on: bool, frame_end: int) -> list[dict]:
-    """Soft / やさしさ flag. Only sent for units whose F0 bit says it exists."""
-    return _cmd_flag(FA_SOFT, on, frame_end)
+def cmd_soft(on: bool, frame_end: int, current: bytes | None = None) -> list[dict]:
+    """Soft / やさしさ flag. Only sent for units whose F0 bit says it exists.
+
+    Off is byte ``00``. ``current`` keeps the rest of the payload non-zero.
+    """
+    return _cmd_flag(FA_SOFT, on, frame_end, current)
 
 
-def cmd_speed(on: bool, frame_end: int) -> list[dict]:
+def cmd_speed(on: bool, frame_end: int, current: bytes | None = None) -> list[dict]:
     """Speed flag. Only sent for units whose F0 bit says it exists."""
-    return _cmd_flag(FA_SPEED, on, frame_end)
+    return _cmd_flag(FA_SPEED, on, frame_end, current)
 
 
-def cmd_cocoro(on: bool, frame_end: int) -> list[dict]:
-    """Cocoro Air app setting. Only sent when the F0 bit says it exists."""
-    return _cmd_flag(FA_COCORO, on, frame_end)
+def cmd_cocoro(on: bool, frame_end: int, current: bytes | None = None) -> list[dict]:
+    """Cocoro Air app setting. Only sent when the F0 bits say it exists."""
+    return _cmd_flag(FA_COCORO, on, frame_end, current)
+
+
+def fa_payload_is_blank(code: str) -> bool:
+    """True when the FA payload, after the checksum and change map, is all zeros.
+
+    The cloud rejects that frame with E1004001. The checksum and the change
+    map sit in the first 16 bytes (32 hex characters) and must not count.
+    """
+    payload = code[32:]
+    return len(code) >= 32 and bool(payload) and set(payload.lower()) <= {"0"}
 
 
 def control_body(
@@ -270,28 +314,40 @@ class Capabilities:
     cocoro: bool = False
     auto_has_setpoint: bool = False
     a04: bool = False
+    rapid: bool = False
     patrol: bool = False
     vertical_vanes: tuple[str, ...] = ()
     horizontal_vanes: tuple[str, ...] = ()
 
 
-def _horizontal_from_capability(blob: bytes) -> tuple[str, ...]:
-    """Positions listed in the capability bytes, limited to the stable set.
-
-    Wide, auto, and enclose are not offered. Swing is included when the unit
-    lists at least one fixed position, because a live swing applied even
-    though that code is not one of the three capability bytes.
-    """
-    listed: list[str] = []
-    for offset in _HORIZONTAL_CAPABILITY_OFFSETS:
-        if offset >= len(blob):
-            continue
-        name = _VANE_H_BY_CODE.get(f"{blob[offset]:02X}")
-        if name in VANE_HORIZONTAL_OFFERED and name != "swing" and name not in listed:
-            listed.append(name)
-    if not listed:
+def _vertical_from_capability(blob: bytes) -> tuple[str, ...]:
+    """Vertical positions for F0 byte 10, the app's vertical pattern."""
+    if len(blob) <= 10:
         return ()
-    return tuple(name for name in VANE_HORIZONTAL_OFFERED if name == "swing" or name in listed)
+    code = blob[10]
+    if code <= 0:
+        return ()
+    if code == 1:
+        return _VERTICAL_BASIC
+    return _VERTICAL_ALL
+
+
+def _horizontal_from_capability(blob: bytes) -> tuple[str, ...]:
+    """Horizontal positions for F0 byte 11, the app's horizontal pattern.
+
+    Byte 12 is the fan pattern, not a vane position. These units report
+    pattern 2, which is straight, left, right, and swing.
+    """
+    if len(blob) <= 11:
+        return ()
+    code = blob[11]
+    if code <= 0:
+        return ()
+    if code == 1:
+        return _HORIZONTAL_NARROW
+    if code == 2:
+        return _HORIZONTAL_STANDARD
+    return _HORIZONTAL_ALL
 
 
 @dataclass
@@ -326,6 +382,8 @@ class Aircon:
     super_jet: bool | None = None
     caps: Capabilities = field(default_factory=Capabilities)
     frame_end: int = 80
+    # Raw FA status. Off and auto writes copy it so the payload is not all zeros.
+    fa_frame: bytes | None = None
 
     @property
     def unique_key(self) -> str:
@@ -359,11 +417,13 @@ def parse_capabilities(blob: bytes | None) -> Capabilities:
         half_degree=bool(byte8 & 0x10),
         soft=bool(byte8 & 0x20),
         speed=bool(byte8 & 0x40),
-        cocoro=bool(byte8 & 0x06),
+        # The app requires both Cocoro bits. Either bit alone is not enough.
+        cocoro=(byte8 & 0x06) == 0x06,
         auto_has_setpoint=blob[13] == 0x05,
         a04=len(blob) > 29 and blob[29] >= 0x38,
+        rapid=len(blob) > 12 and blob[12] == 0x03,
         patrol=blob[6] == 0x41,
-        vertical_vanes=_VERTICAL_MODES,
+        vertical_vanes=_vertical_from_capability(blob),
         horizontal_vanes=_horizontal_from_capability(blob),
     )
 
@@ -459,8 +519,12 @@ def aircon_from_parts(
         half_byte = fa_byte(FA_SETPOINT)
         if half_byte is not None:
             half = half_byte / 2
-            # FA byte 26 can lag behind B3. Keep B3 unless FA agrees within 0.5 °C.
-            if 10 <= half <= 40 and (setpoint is None or abs(half - setpoint) <= 0.5):
+            # FA byte 26 can lag. Use it only when it is B3, or up to 0.5 °C above
+            # B3. A byte that is still on the previous degree must not win.
+            if setpoint is None:
+                if 10 <= half <= 40:
+                    setpoint = half
+            elif 0 <= half - setpoint <= 0.5:
                 setpoint = half
 
     humidity: int | None = None
@@ -542,6 +606,7 @@ def aircon_from_parts(
         super_jet=_flag(fa_byte(FA_SUPER_JET)),
         caps=caps,
         frame_end=frame_end,
+        fa_frame=fa,
     )
 
 

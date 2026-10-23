@@ -30,8 +30,10 @@ class SharpSwitchDescription(SwitchEntityDescription):
     supported: Callable[[Aircon], bool] = lambda _device: True
 
 
-def _fa_command(builder: Callable[[bool, int], list[dict]]) -> Callable[[bool, Aircon], list[dict]]:
-    return lambda on, device: builder(on, device.frame_end)
+def _fa_command(
+    builder: Callable[..., list[dict]],
+) -> Callable[[bool, Aircon], list[dict]]:
+    return lambda on, device: builder(on, device.frame_end, device.fa_frame)
 
 
 SWITCHES: tuple[SharpSwitchDescription, ...] = (
