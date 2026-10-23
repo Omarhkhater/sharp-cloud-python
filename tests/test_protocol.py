@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -390,9 +391,33 @@ def test_package_metadata():
     ).read_text()
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["config_flow"] is True
-    assert manifest["version"]
+    assert manifest["version"] == "0.2.1"
+    assert manifest["name"] == "Sharp Air Egypt"
+    assert manifest["domain"] == "sharp_cocoro_air"
     assert "quality_scale" not in manifest
     assert "domains" not in hacs
+    assert hacs["name"] == "Sharp Air Egypt"
     assert strings == translations
+    assert "Sharp Air Egypt" in strings
     assert "Enable experimental controls" in strings
     assert "password" not in strings.lower()
+
+
+def test_brand_logo_is_the_supplied_png():
+    """The 512px logo is the supplied file, and the 256px icon is the same square."""
+    brand = ROOT / "custom_components" / "sharp_cocoro_air" / "brand"
+    original = (brand / "icon@2x.png").read_bytes()
+    assert (
+        hashlib.sha256(original).hexdigest()
+        == "07aa5d08d3fc91571e87a894f745b598f85cd7f4eb8171d2787ae12b9ff098c5"
+    )
+    assert (brand / "logo@2x.png").read_bytes() == original
+    assert _png_size(original) == (512, 512)
+    assert _png_size((brand / "icon.png").read_bytes()) == (256, 256)
+    assert _png_size((brand / "logo.png").read_bytes()) == (256, 256)
+
+
+def _png_size(data: bytes) -> tuple[int, int]:
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert data[12:16] == b"IHDR"
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")

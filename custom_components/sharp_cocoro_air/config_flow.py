@@ -38,7 +38,7 @@ _SCHEMA = vol.Schema({vol.Required(CONF_REDIRECT_URL): str})
 
 
 class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Set up Sharp Air Control, or sign in again when the session dies."""
+    """Set up Sharp Air Egypt, or sign in again when the session dies."""
 
     VERSION = 1
 
@@ -79,7 +79,7 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "unknown"
                 else:
                     return self.async_create_entry(
-                        title="Sharp Air Control",
+                        title="Sharp Air Egypt",
                         data=_entry_data(account),
                     )
                 finally:

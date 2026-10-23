@@ -1,4 +1,4 @@
-"""Constants for the Sharp Air Control (Egypt) integration."""
+"""Constants for the Sharp Air Egypt integration."""
 
 from __future__ import annotations
 

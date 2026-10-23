@@ -1,6 +1,6 @@
 {
   "domain": "sharp_cocoro_air",
-  "name": "Sharp Air Control",
+  "name": "Sharp Air Egypt",
   "codeowners": ["@Omarhkhater"],
   "config_flow": true,
   "documentation": "https://github.com/Omarhkhater/sharp-cloud-python",
@@ -9,5 +9,5 @@
   "issue_tracker": "https://github.com/Omarhkhater/sharp-cloud-python/issues",
   "loggers": ["custom_components.sharp_cocoro_air"],
   "requirements": [],
-  "version": "0.2.0"
+  "version": "0.2.1"
 }

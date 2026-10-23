@@ -1,4 +1,6 @@
-# Sharp Air Control (Egypt)
+# Sharp Air Egypt
+
+![Sharp Air Egypt](custom_components/sharp_cocoro_air/brand/logo.png)
 
 Home Assistant custom integration for Sharp room air conditioners on the **Sharp Egypt** cloud used by the SHARP Air Control app (`com.elarabygroup.elshaircond`, El Araby Group).
 
@@ -16,7 +18,7 @@ The integration talks to `eg-hms.cloudlabs.sharp.co.jp`. It does not use a passw
 3. Add this repository:
    - Repository: `https://github.com/Omarhkhater/sharp-cloud-python`
    - Category: **Integration**
-4. Click **Add**, then find **Sharp Air Control** in the HACS integration list and download it.
+4. Click **Add**, then find **Sharp Air Egypt** in the HACS integration list and download it.
 5. Restart Home Assistant.
 
 Home Assistant 2025.1.0 or newer is required.
@@ -29,7 +31,7 @@ Copy `custom_components/sharp_cocoro_air` into your Home Assistant `config/custo
 
 The app signs in with Azure AD B2C in a browser. Home Assistant never sees the account password.
 
-1. Go to **Settings → Devices & services → Add integration** and choose **Sharp Air Control**.
+1. Go to **Settings → Devices & services → Add integration** and choose **Sharp Air Egypt**.
 2. The setup form shows an authorize link. Open that link in a browser (phone or computer) and sign in with the same account you use in SHARP Air Control.
 3. After a successful sign-in the browser tries to open `https://sharp-cocoroair-egypt/?code=...`. That page does not load. That is expected.
 4. Copy the **entire address** from the address bar. It is fine if the browser says it cannot open the page.
@@ -77,13 +79,13 @@ Half-degree setpoints, vertical and horizontal vanes, the Rapid fan speed, and t
 
 Experimental controls can report a failure and still change the unit. On a live AY-XP12YHE, FA-frame writes came back `unmatch` (shown in Home Assistant as "The air conditioner rejected the command"), yet the vane position still changed. Rapid also came back `unmatch`, and the unit then briefly reported Strong. Home Assistant does not retry these commands. It refreshes status shortly after any write; trust what it shows, not the error. If the unit is not where you want it, set it again yourself.
 
-To turn them on: **Settings → Devices & services → Sharp Air Control → Configure**, then enable **Enable experimental controls**. Soft, Speed, and Cocoro Air appear only after that, and only when that unit's capability data says the feature exists. On the three units above, those bits are off, so those three switches stay hidden.
+To turn them on: **Settings → Devices & services → Sharp Air Egypt → Configure**, then enable **Enable experimental controls**. Soft, Speed, and Cocoro Air appear only after that, and only when that unit's capability data says the feature exists. On the three units above, those bits are off, so those three switches stay hidden.
 
 Vane positions, when enabled: vertical Auto, Up, Horizontal, Down 1, Down 2, Down, and Swing; horizontal Auto, Straight, Left, Right, Wide, Enclose, and Swing. The captured status frames put those values at FA indexes 49 and 50 (section 4.4). Section 4.2's table lists 48 and 49; the frames do not match that numbering.
 
 ## Removing the integration
 
-Deleting Sharp Air Control in Home Assistant does not delete it from the Sharp cloud. Setup registers a terminal named **Home Assistant** (`spremote_a_eg`) and pairs it to each air conditioner. That terminal stays paired after you remove the integration.
+Deleting Sharp Air Egypt in Home Assistant does not delete it from the Sharp cloud. Setup registers a terminal named **Home Assistant** (`spremote_a_eg`) and pairs it to each air conditioner. That terminal stays paired after you remove the integration.
 
 The cloud has an unpair request (`PUT setting/pairing/` with the terminal id and box id). The live capture never sent it, and the `houseFlag` value for that request is not confirmed, so this integration does not call it.
 
