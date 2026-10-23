@@ -12,6 +12,7 @@ from custom_components.sharp_cocoro_air.protocol import (
     ControlFrame,
     aircon_from_record,
     authorize_url,
+    boxes_missing_terminal,
     cmd_fan,
     cmd_mode,
     cmd_plasmacluster,
@@ -38,6 +39,7 @@ def test_fixture_matches_the_live_decode(boxinfo):
     """The three captured units decode to the states that matched reality."""
     _box_ids, devices = split_box_info(boxinfo)
     assert len(devices) == 3
+    assert {device.unique_key for device in devices} == {"1|013001", "2|013001", "3|013001"}
     living = _by_name(devices, "Living Room AC")
     kids = _by_name(devices, "Kid’s Bedroom AC")
     bedroom = _by_name(devices, "Bedroom")
@@ -65,13 +67,12 @@ def test_fixture_matches_the_live_decode(boxinfo):
     assert living.vane_vertical == "auto"
     assert living.vane_horizontal == "straight"
     assert living.sleep is False
+    assert living.unique_key == "1|013001"
+    assert "BOX_ID" not in living.unique_key
 
     props = parse_echonet_property(boxinfo["devices"][0]["echonetProperty"])
     # 1-based FA index 27 is byte 26, and it agrees with the integer setpoint.
     assert props[0xFA][26] == 0x2A
-    # Vertical vane is 1-based index 49 (byte 48, hex chars 96:98).
-    assert props[0xFA][48] == 0x00
-    assert props[0xFA][49] == 0x01
 
     assert kids.model == "AY-XP12YHE"
     assert kids.power is False
@@ -210,6 +211,36 @@ def test_half_degree_setpoint_uses_the_fa_frame_only():
         cmd_setpoint(26.5, half_degree=False, frame_end=80)
 
 
+def test_vane_indexes_follow_the_fixture_not_section_42(boxinfo):
+    """Vanes are 1-based indexes 49 and 50.
+
+    Section 4.2's table lists 48 and 49. Section 4.4 lists 49 and 50.
+    Living Room is vertical auto (00) then horizontal straight (01) at
+    0-based bytes 48 and 49. Kid's Bedroom vertical up (01) is that same
+    byte 48. Using 48/49 as 1-based indexes would read horizontal from the
+    vertical byte and would not decode straight.
+    """
+    living_fa = parse_echonet_property(boxinfo["devices"][0]["echonetProperty"])[0xFA]
+    kids_fa = parse_echonet_property(boxinfo["devices"][1]["echonetProperty"])[0xFA]
+    assert living_fa[48] == 0x00
+    assert living_fa[49] == 0x01
+    assert kids_fa[48] == 0x01
+    assert kids_fa[47] == 0x00
+
+    _ids, devices = split_box_info(boxinfo)
+    living = _by_name(devices, "Living Room AC")
+    assert living.vane_vertical == "auto"
+    assert living.vane_horizontal == "straight"
+
+    raw = bytes.fromhex(
+        cmd_vanes(vertical="swing", horizontal="auto", frame_end=80)[0]["valueBinary"]["code"]
+    )
+    assert raw[48] == 0x07
+    assert raw[49] == 0x0A
+    # Section 4.2's 1-based 48 would have written the vertical code here.
+    assert raw[47] == 0x00
+
+
 def test_mode_power_fan_and_vanes():
     """Commands follow the EPC tables and do not force Plasmacluster on."""
     assert cmd_power(False) == [
@@ -292,6 +323,25 @@ def test_diagnostics_omit_identifiers(boxinfo):
     assert "806" in text
 
 
+def test_pairing_skips_a_terminal_that_is_already_listed():
+    """terminalAppInfo is the signal to skip pairing. A missing list still pairs."""
+    terminal = "https://example.invalid/terminal/1"
+    payload = {
+        "box": [
+            {
+                "boxId": "https://example.invalid/box/a",
+                "terminalAppInfo": [{"terminalAppId": terminal}],
+            },
+            {"boxId": "https://example.invalid/box/b", "terminalAppInfo": []},
+            {"boxId": "https://example.invalid/box/c"},
+        ]
+    }
+    assert boxes_missing_terminal(payload, terminal) == [
+        "https://example.invalid/box/b",
+        "https://example.invalid/box/c",
+    ]
+
+
 def test_package_metadata():
     """HACS and the manifest describe a cloud-polling config-flow integration."""
     manifest = json.loads(
@@ -306,6 +356,7 @@ def test_package_metadata():
     assert manifest["config_flow"] is True
     assert manifest["version"]
     assert "quality_scale" not in manifest
-    assert hacs["domains"] == ["sharp_cocoro_air"]
+    assert "domains" not in hacs
     assert strings == translations
+    assert "Enable experimental controls" in strings
     assert "password" not in strings.lower()

@@ -11,8 +11,8 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import SharpAuthError, SharpClient, SharpConnectionError, SharpError
-from .const import CONF_COOKIES, DOMAIN, SCAN_INTERVAL
-from .protocol import Aircon, split_box_info, with_updates
+from .const import CONF_COOKIES, CONF_EXPERIMENTAL, DOMAIN, SCAN_INTERVAL
+from .protocol import Aircon, boxes_missing_terminal, split_box_info, with_updates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +32,12 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         self.entry = entry
         self.client = client
         self._lock = asyncio.Lock()
-        self._paired = False
+        self.tracked_options = dict(entry.options)
+
+    @property
+    def experimental(self) -> bool:
+        """FA-frame controls the user turned on in the options flow."""
+        return bool(self.entry.options.get(CONF_EXPERIMENTAL, False))
 
     async def _async_update_data(self) -> dict[str, Aircon]:
         async with self._lock:
@@ -42,14 +47,12 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                 raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
             except SharpError as err:
                 raise UpdateFailed("Could not reach the Sharp cloud") from err
-            box_ids, devices = split_box_info(payload)
-            if not self._paired:
-                for box_id in box_ids:
-                    try:
-                        await self.client.pair(box_id)
-                    except SharpError:
-                        _LOGGER.debug("Pairing was not accepted")
-                self._paired = True
+            for box_id in boxes_missing_terminal(payload, self.client.terminal_app_id):
+                try:
+                    await self.client.pair(box_id)
+                except SharpError:
+                    _LOGGER.debug("Pairing was not accepted")
+            _box_ids, devices = split_box_info(payload)
             self._persist_cookies()
             return {device.unique_key: device for device in devices}
 
@@ -76,14 +79,25 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             self._persist_cookies()
 
     def _persist_cookies(self) -> None:
+        """Store the jar when the session id changes.
+
+        The load balancer rotates AWSALB cookies on their own. Rewriting the
+        config entry for those would reload nothing useful and wake listeners.
+        """
         cookies = self.client.export_cookies()
-        if not cookies:
+        current = _session_id(cookies)
+        if not current:
             return
-        stored = self.entry.data.get(CONF_COOKIES) or []
-        current = sorted((item["name"], item["value"]) for item in cookies)
-        previous = sorted((item.get("name"), item.get("value")) for item in stored)
-        if current == previous:
+        stored = _session_id(self.entry.data.get(CONF_COOKIES) or [])
+        if current == stored:
             return
         data = dict(self.entry.data)
         data[CONF_COOKIES] = cookies
         self.hass.config_entries.async_update_entry(self.entry, data=data)
+
+
+def _session_id(cookies: list[dict]) -> str | None:
+    for item in cookies:
+        if item.get("name") == "JSESSIONID":
+            return item.get("value")
+    return None

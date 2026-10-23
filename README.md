@@ -51,23 +51,28 @@ Each air conditioner:
 
 | Entity | What it does |
 |---|---|
-| Climate | On/off, mode (auto, cool, heat, dry, fan), target temperature, room temperature, humidity, fan speed, vertical vane, horizontal vane |
+| Climate | On/off, mode (auto, cool, heat, dry, fan), whole-degree target temperature, room temperature, humidity, fan speed |
 | Outdoor temperature | EPC `BE` |
 | Power | Instantaneous watts, EPC `84` |
 | Energy | Cumulative kWh from EPC `85`, using the ECHONET scale of 0.001 kWh per count |
 | Plasmacluster | On/off, EPC `CF` |
-| Sleep | FA-frame sleep flag |
 | Fault | On when EPC `88` reports a fault |
 
-Whole-degree target temperatures use EPC `B3`. That path was confirmed on a live unit (21 °C → 22 °C → 21 °C). If you set a half degree, such as 21.5 °C, the integration sends the Sharp FA frame instead. These units advertise half-degree support in their capability data. The temperature slider runs from 16 °C to 32 °C; the cloud rejects a value the unit cannot use.
+Only the browser sign-in, terminal pairing, and a whole-degree setpoint change were confirmed on a live unit (21 °C → 22 °C → 21 °C, EPC `B3`). Power, mode, fan, and Plasmacluster are the same kind of single-EPC write and need one supervised test each before you rely on them.
+
+The temperature slider runs from 16 °C to 30 °C. F0 names a per-model range table, but that table was not in the capture, so the slider uses this span. The cloud rejects a value the unit cannot use.
 
 Fan speeds are Auto, Quiet, Very weak, Weak, Strong, and Rapid.
 
-Vertical vane positions are Auto, Up, Horizontal, Down 1, Down 2, Down, and Swing. Horizontal positions are Auto, Straight, Left, Right, Wide, Enclose, and Swing.
-
-Soft, Speed, and Cocoro Air switches are created only when that unit's capability data says the feature exists. On the three units above, those bits are off, so the switches do not appear.
-
 The integration polls about every 60 seconds. After a command is accepted, the entity updates immediately instead of waiting for the next poll.
+
+### Experimental controls
+
+Half-degree setpoints, vertical and horizontal vanes, and the Sleep switch send the Sharp FA frame. Those writes were not confirmed live. They are off by default.
+
+To turn them on: **Settings → Devices & services → Sharp Air Control → Configure**, then enable **Enable experimental controls**. Soft, Speed, and Cocoro Air appear only after that, and only when that unit's capability data says the feature exists. On the three units above, those bits are off, so those three switches stay hidden.
+
+Vane positions, when enabled: vertical Auto, Up, Horizontal, Down 1, Down 2, Down, and Swing; horizontal Auto, Straight, Left, Right, Wide, Enclose, and Swing. The captured status frames put those values at FA indexes 49 and 50 (section 4.4). Section 4.2's table lists 48 and 49; the frames do not match that numbering.
 
 ## If Home Assistant asks you to sign in again
 
@@ -75,16 +80,14 @@ A 401 first retries login with the stored terminal id and cookies. If that fails
 
 ## What to try first
 
-Use one unit, then put it back:
+Use one unit, then put it back. Leave experimental controls off for this pass.
 
 1. Confirm all three units appear, with the right on/off state, mode, room temperature, and setpoint.
-2. Change the setpoint by 1 °C, wait until the app shows the same number, then change it back.
-3. Set a half degree (for example 21.5 °C) and confirm it in the Sharp app. Then set a whole degree again.
-4. Change fan speed, vertical vane, and horizontal vane.
-5. Toggle Plasmacluster, then Sleep. Turn each one back.
-6. Turn the unit off and on.
-7. Compare **Power** (W) with the unit while it is cooling, and compare **Energy** (kWh) with the app's energy graph. Energy uses the standard ECHONET scaling and has not been checked against the app's graph.
-8. Restart Home Assistant and confirm the units come back without another sign-in.
+2. Change the setpoint by 1 °C, wait until the app shows the same number, then change it back. This path was confirmed live.
+3. Change the mode, then the fan speed, then Plasmacluster. Put each one back. These still need one supervised test.
+4. Turn the unit off and on, and put it back. Power on/off also needs that supervised test.
+5. Compare **Power** (W) with the unit while it is cooling, and compare **Energy** (kWh) with the app's energy graph. Energy uses the standard ECHONET scaling and has not been checked against the app's graph.
+6. Restart Home Assistant and confirm the units come back without another sign-in.
 
 ## Not included
 

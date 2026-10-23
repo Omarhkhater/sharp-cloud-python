@@ -24,7 +24,19 @@
     },
     "abort": {
       "already_configured": "This Sharp account is already set up.",
-      "reauth_successful": "Signed in again."
+      "reauth_successful": "Signed in again.",
+      "unique_id_mismatch": "That sign-in belongs to a different Sharp account."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Sharp Air Control options",
+        "description": "Experimental controls send FA-frame commands that have not been confirmed on a live unit. Half-degree temperatures, vane positions, Sleep, Soft, Speed and Cocoro Air stay hidden while this is off.",
+        "data": {
+          "experimental_controls": "Enable experimental controls"
+        }
+      }
     }
   },
   "entity": {

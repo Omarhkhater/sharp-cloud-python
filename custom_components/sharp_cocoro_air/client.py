@@ -15,10 +15,17 @@ import urllib.parse
 from dataclasses import dataclass
 
 import aiohttp
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from yarl import URL
 
 from .const import APP_NAME, APP_SECRET, HMS_API, SERVICE_NAME, USER_AGENT
-from .protocol import Aircon, control_body, split_box_info
+from .protocol import (
+    Aircon,
+    box_lists_terminal,
+    boxes_missing_terminal,
+    control_body,
+)
 
 _NONCE_ALPHABET = string.ascii_letters + string.digits
 
@@ -53,14 +60,11 @@ class Account:
     cookies: list[dict[str, str]]
 
 
-def new_session() -> aiohttp.ClientSession:
-    """Session with its own cookie jar. HA's shared session is not used."""
-    connector = aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
-    return aiohttp.ClientSession(
-        connector=connector,
+def async_get_clientsession(hass: HomeAssistant) -> aiohttp.ClientSession:
+    """Home Assistant closes this session. The jar is not shared with other integrations."""
+    return async_create_clientsession(
+        hass,
         cookie_jar=aiohttp.CookieJar(unsafe=True),
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-        timeout=aiohttp.ClientTimeout(total=30),
     )
 
 
@@ -96,6 +100,7 @@ class SharpClient:
         """Bind the client to a session and an API base URL."""
         self._session = session
         self.terminal_app_id = terminal_app_id
+        self._user_id: str | None = None
         self._base_url = base_url if base_url.endswith("/") else f"{base_url}/"
         self.poll_interval = 1.0
         self.poll_attempts = 20
@@ -143,10 +148,12 @@ class SharpClient:
         ok: tuple[int, ...] = (200,),
     ) -> tuple[int, dict | list | None]:
         url = URL(build_url(self._base_url, path, params), encoded=True)
-        kwargs: dict = {}
+        # Home Assistant replaces the session's default User-Agent, so set it here.
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        kwargs: dict = {"headers": headers, "timeout": aiohttp.ClientTimeout(total=30)}
         if json_body is not None:
             kwargs["json"] = json_body
-            kwargs["headers"] = {"Content-Type": "application/json; charset=utf-8"}
+            headers["Content-Type"] = "application/json; charset=utf-8"
         try:
             async with self._session.request(method, url, **kwargs) as response:
                 status = response.status
@@ -260,48 +267,79 @@ class SharpClient:
             ok=(200, 201),
         )
 
-    async def sign_in(self, code: str) -> Account:
-        """First-time setup: new terminal, code exchange, register, pair."""
+    async def exchange_code(self, code: str) -> str:
+        """New terminal and code exchange. Does not register or pair.
+
+        The config flow checks the account id before either of those, so a
+        second setup does not leave a terminal attached to the boxes.
+        """
         await self.fetch_terminal_app_id()
         await self.login_with_code(code)
-        await self.register_terminal()
-        return await self._finish_account()
+        return await self._load_user_id()
+
+    async def finish_setup(self, *, register: bool = True) -> Account:
+        """Register this terminal when it is new, and pair boxes that lack it."""
+        if register:
+            await self.register_terminal()
+        await self.pair_missing()
+        if not self.terminal_app_id or not self._user_id:
+            raise SharpAuthError("Sharp sign-in expired")
+        return Account(
+            user_id=self._user_id,
+            terminal_app_id=self.terminal_app_id,
+            cookies=self.export_cookies(),
+        )
+
+    async def sign_in(self, code: str) -> Account:
+        """First-time setup: new terminal, code exchange, register, pair."""
+        await self.exchange_code(code)
+        return await self.finish_setup()
 
     async def refresh_with_code(self, code: str) -> Account:
         """Re-auth. Keeps the existing terminal so the boxes stay paired."""
         if not self.terminal_app_id:
             return await self.sign_in(code)
         await self.login_with_code(code)
-        return await self._finish_account()
+        await self._load_user_id()
+        return await self.finish_setup(register=False)
 
-    async def _finish_account(self) -> Account:
+    async def _load_user_id(self) -> str:
         info = await self.user_info()
         user_id = str(info.get("userId") or "")
         if not user_id:
             raise SharpAuthError("Sharp sign-in expired")
+        self._user_id = user_id
+        return user_id
+
+    async def pair_missing(self) -> None:
+        """Pair this terminal only to boxes that do not already list it."""
         payload = await self.box_info()
-        box_ids, _devices = split_box_info(payload)
-        for box_id in box_ids:
+        for box_id in boxes_missing_terminal(payload, self.terminal_app_id):
             try:
                 await self.pair(box_id)
             except SharpAPIError:
                 # Already paired, or the box rejected it. Commands retry pairing.
                 continue
+
+    async def terminal_is_paired(self, box_id: str) -> bool:
+        """Look at boxInfo before pairing again after a control 400."""
         if not self.terminal_app_id:
-            raise SharpAuthError("Sharp sign-in expired")
-        return Account(
-            user_id=user_id,
-            terminal_app_id=self.terminal_app_id,
-            cookies=self.export_cookies(),
-        )
+            return False
+        try:
+            payload = await self.box_info()
+        except SharpAuthError:
+            raise
+        except SharpError:
+            return False
+        return box_lists_terminal(payload, box_id, self.terminal_app_id)
 
     async def send_control(self, device: Aircon, status: list[dict]) -> None:
-        """Send a command, pairing once if the box has not accepted this terminal."""
+        """Send a command. A 400 pairs the box only when this terminal is absent."""
         body = control_body(device.device_id, device.echonet_node, device.echonet_object, status)
         try:
             control_id = await self._device_control(device.box_id, body)
         except SharpAPIError as err:
-            if err.status != 400:
+            if err.status != 400 or await self.terminal_is_paired(device.box_id):
                 raise
             await self.pair(device.box_id)
             control_id = await self._device_control(device.box_id, body)

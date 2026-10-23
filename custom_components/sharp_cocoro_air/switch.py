@@ -6,12 +6,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import SharpConfigEntry
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import SharpCoordinator
 from .protocol import (
@@ -31,6 +33,7 @@ class SharpSwitchDescription(SwitchEntityDescription):
     is_on_fn: Callable[[Aircon], bool | None]
     command_fn: Callable[[bool, Aircon], list[dict]]
     field: str
+    experimental: bool = False
     supported: Callable[[Aircon], bool] = lambda _device: True
 
 
@@ -52,6 +55,7 @@ SWITCHES: tuple[SharpSwitchDescription, ...] = (
         is_on_fn=lambda device: device.sleep,
         command_fn=_fa_command(cmd_sleep),
         field="sleep",
+        experimental=True,
     ),
     SharpSwitchDescription(
         key="soft",
@@ -59,6 +63,7 @@ SWITCHES: tuple[SharpSwitchDescription, ...] = (
         is_on_fn=lambda device: device.soft,
         command_fn=_fa_command(cmd_soft),
         field="soft",
+        experimental=True,
         supported=lambda device: device.caps.soft,
     ),
     SharpSwitchDescription(
@@ -67,26 +72,32 @@ SWITCHES: tuple[SharpSwitchDescription, ...] = (
         is_on_fn=lambda device: device.speed,
         command_fn=_fa_command(cmd_speed),
         field="speed",
+        experimental=True,
         supported=lambda device: device.caps.speed,
     ),
     SharpSwitchDescription(
         key="cocoro_air",
         translation_key="cocoro_air",
+        entity_category=EntityCategory.CONFIG,
         is_on_fn=lambda device: device.cocoro_air,
         command_fn=_fa_command(cmd_cocoro),
         field="cocoro_air",
+        experimental=True,
         supported=lambda device: device.caps.cocoro,
     ),
 )
 
+_EXPERIMENTAL_KEYS = tuple(item.key for item in SWITCHES if item.experimental)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: SharpConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Create the switches each unit actually supports."""
-    coordinator: SharpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
+    _retire_experimental(hass, entry, coordinator)
     seen: set[str] = set()
 
     def _add() -> None:
@@ -95,6 +106,8 @@ async def async_setup_entry(
         fresh = []
         for key, device in coordinator.data.items():
             for description in SWITCHES:
+                if description.experimental and not coordinator.experimental:
+                    continue
                 if not description.supported(device):
                     continue
                 ident = f"{key}:{description.key}"
@@ -107,6 +120,24 @@ async def async_setup_entry(
 
     entry.async_on_unload(coordinator.async_add_listener(_add))
     _add()
+
+
+def _retire_experimental(
+    hass: HomeAssistant, entry: SharpConfigEntry, coordinator: SharpCoordinator
+) -> None:
+    """Remove FA-frame switches when the option is turned back off."""
+    if coordinator.experimental:
+        return
+    registry = er.async_get(hass)
+    for entity in list(registry.entities.values()):
+        if entity.config_entry_id != entry.entry_id or entity.domain != "switch":
+            continue
+        if not entity.unique_id:
+            continue
+        for key in _EXPERIMENTAL_KEYS:
+            if entity.unique_id.endswith(f"_{key}"):
+                registry.async_remove(entity.entity_id)
+                break
 
 
 class SharpSwitch(CoordinatorEntity[SharpCoordinator], SwitchEntity):

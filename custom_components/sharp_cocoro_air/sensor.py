@@ -11,13 +11,13 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfPower, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import SharpConfigEntry
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import SharpCoordinator
 from .protocol import Aircon
@@ -63,11 +63,11 @@ SENSORS: tuple[SharpSensorDescription, ...] = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: SharpConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Create the three sensors for each air conditioner."""
-    coordinator: SharpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     seen: set[str] = set()
 
     def _add() -> None:

@@ -28,16 +28,17 @@ B2C_SCOPE = "openid offline_access"
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
-# F0 byte 13 selects a range table that is not present in the captured frames.
-# The slider covers the usual Sharp remote span with a little headroom. The
-# unit rejects a value it cannot use, and that command is not applied locally.
+# F0 byte 13 selects a per-model range table that was not in the capture.
+# The slider is the usual Sharp remote span. The cloud rejects anything outside it.
 TEMP_MIN = 16.0
-TEMP_MAX = 32.0
+TEMP_MAX = 30.0
 
 CONF_REDIRECT_URL = "redirect_url"
 CONF_TERMINAL_APP_ID = "terminal_app_id"
 CONF_COOKIES = "cookies"
 CONF_USER_ID = "user_id"
+# Off unless the user opts in. Covers FA-frame writes that were not confirmed live.
+CONF_EXPERIMENTAL = "experimental_controls"
 
 # ECHONET operation-mode codes (EPC B0).
 MODE_AUTO = "auto"
@@ -64,7 +65,8 @@ FAN_MODES: tuple[tuple[str, str], ...] = (
     ("rapid", "38"),
 )
 
-# FA frame, 1-based byte 49. "horizontal" is the level vane position.
+# FA frame, 1-based index 49 (0-based byte 48). Section 4.2's table says 48,
+# and section 4.4 says 49. The captured frames put vertical auto/up here.
 VANE_VERTICAL: tuple[tuple[str, str], ...] = (
     ("auto", "00"),
     ("up", "01"),
@@ -75,7 +77,8 @@ VANE_VERTICAL: tuple[tuple[str, str], ...] = (
     ("swing", "07"),
 )
 
-# FA frame, 1-based byte 50.
+# FA frame, 1-based index 50 (0-based byte 49). The captured frames put
+# horizontal straight (01) here, which is what section 4.4 specifies.
 VANE_HORIZONTAL: tuple[tuple[str, str], ...] = (
     ("auto", "0A"),
     ("straight", "01"),

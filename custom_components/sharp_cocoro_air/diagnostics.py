@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 from homeassistant.components.diagnostics import async_redact_data
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_COOKIES, CONF_TERMINAL_APP_ID, CONF_USER_ID, DOMAIN
-from .coordinator import SharpCoordinator
+from . import SharpConfigEntry
+from .const import CONF_COOKIES, CONF_TERMINAL_APP_ID, CONF_USER_ID
 from .protocol import device_diagnostics
 
 _REDACT = {CONF_TERMINAL_APP_ID, CONF_USER_ID, CONF_COOKIES}
 
 
-async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict:
+async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: SharpConfigEntry) -> dict:
     """Return status without cookies, terminal ids, box ids, or node addresses."""
-    coordinator: SharpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     devices = list((coordinator.data or {}).values())
     cookies = entry.data.get(CONF_COOKIES) or []
     return async_redact_data(

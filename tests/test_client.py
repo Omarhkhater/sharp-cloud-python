@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import aiohttp
 import pytest
 import pytest_socket
 from aiohttp import web
@@ -14,7 +15,6 @@ from custom_components.sharp_cocoro_air.client import (
     SharpClient,
     SharpConnectionError,
     app_nonce,
-    new_session,
 )
 from custom_components.sharp_cocoro_air.const import APP_NAME, APP_SECRET
 from custom_components.sharp_cocoro_air.protocol import Aircon, cmd_setpoint
@@ -102,9 +102,17 @@ async def cloud(boxinfo):
     await runner.cleanup()
 
 
+def _session() -> aiohttp.ClientSession:
+    """A session this test owns. Production uses Home Assistant's session helper."""
+    connector = aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+    return aiohttp.ClientSession(
+        connector=connector,
+        cookie_jar=aiohttp.CookieJar(unsafe=True),
+    )
+
+
 async def _client(base: str, terminal: str | None = None) -> SharpClient:
-    session = new_session()
-    client = SharpClient(session, terminal, base_url=base)
+    client = SharpClient(_session(), terminal, base_url=base)
     client.poll_interval = 0
     return client
 
@@ -122,8 +130,8 @@ async def test_sign_in_registers_and_pairs_with_encoded_queries(cloud):
     assert paths[:5] == [
         "setting/terminalAppId/",
         "setting/login/",
-        "setting/terminal",
         "setting/userInfo",
+        "setting/terminal",
         "setting/boxInfo",
     ]
     assert paths[5:] == ["setting/pairing/"] * 3
@@ -140,7 +148,7 @@ async def test_sign_in_registers_and_pairs_with_encoded_queries(cloud):
     assert "%3D" in login["query"]
     assert login["user_agent"].startswith("smartlink_v200a_eg")
 
-    registered = json.loads(fake.calls[2]["body"])
+    registered = json.loads(fake.calls[3]["body"])
     assert registered["appName"] == APP_NAME
     assert registered["permitTidLogin"] == 1
     assert registered["expireSecTidLogin"] == 0
@@ -259,13 +267,14 @@ async def test_unpaired_control_pairs_and_retries(cloud):
     paths = [call["path"].rstrip("/").rsplit("/", 1)[-1] for call in fake.calls]
     assert paths == [
         "deviceControl",
+        "boxInfo",
         "pairing",
         "deviceControl",
         "controlResult",
         "controlResult",
     ]
-    assert fake.calls[1]["params"]["houseFlag"] == "false"
-    assert fake.calls[1]["body"] == b""
+    assert fake.calls[2]["params"]["houseFlag"] == "false"
+    assert fake.calls[2]["body"] == b""
 
 
 async def test_http_errors_do_not_echo_identifiers(cloud):
@@ -283,13 +292,70 @@ async def test_http_errors_do_not_echo_identifiers(cloud):
     assert "example.invalid" not in message
     assert "secret" not in message
 
-    closed = SharpClient(new_session(), base_url="http://127.0.0.1:1/hems/pfApi/ta/")
+    closed = SharpClient(_session(), base_url="http://127.0.0.1:1/hems/pfApi/ta/")
     try:
         with pytest.raises(SharpConnectionError) as caught_conn:
             await closed.box_info()
     finally:
         await closed.aclose()
     assert "127.0.0.1" not in str(caught_conn.value)
+
+
+async def test_sign_in_skips_boxes_that_already_list_the_terminal(cloud):
+    """A terminal already in terminalAppInfo is not paired again."""
+    fake, base = cloud
+    terminal = "https://example.invalid/terminal/1"
+    listed = {
+        **fake.boxinfo["devices"][0],
+        "terminalAppInfo": [{"terminalAppId": terminal, "appName": "spremote_a_eg:1:1.0.4"}],
+    }
+    fake.boxinfo = {"devices": [listed, fake.boxinfo["devices"][1], fake.boxinfo["devices"][2]]}
+    client = await _client(base)
+    try:
+        await client.sign_in("auth-code-value")
+    finally:
+        await client.aclose()
+
+    paired = [
+        call["params"]["boxId"]
+        for call in fake.calls
+        if call["path"].rstrip("/").endswith("pairing")
+    ]
+    assert paired == ["<BOX_ID_1>", "<BOX_ID_2>"]
+
+
+async def test_control_400_does_not_pair_when_the_terminal_is_listed(cloud):
+    """A 400 is a pairing retry only when this terminal is absent from the box."""
+    fake, base = cloud
+    fake.fail_control_once = True
+    terminal = "https://example.invalid/terminal/1"
+    fake.boxinfo = {
+        "box": [
+            {
+                "boxId": "box-1",
+                "terminalAppInfo": [{"terminalAppId": terminal}],
+                "echonetData": [],
+            }
+        ]
+    }
+    client = await _client(base, terminal)
+    device = Aircon(
+        box_id="box-1",
+        device_id=7,
+        echonet_node="00-11-22-33-44-55",
+        echonet_object="013001",
+        name="Test",
+        model=None,
+    )
+    try:
+        with pytest.raises(SharpAPIError):
+            await client.send_control(device, cmd_setpoint(21, half_degree=False, frame_end=80))
+    finally:
+        await client.aclose()
+
+    paths = [call["path"].rstrip("/").rsplit("/", 1)[-1] for call in fake.calls]
+    assert paths == ["deviceControl", "boxInfo"]
+    assert not any(path == "pairing" for path in paths)
 
 
 def test_nonce_is_32_alnum():

@@ -6,12 +6,13 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import SharpConfigEntry
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import SharpCoordinator
 from .protocol import Aircon
@@ -19,11 +20,11 @@ from .protocol import Aircon
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: SharpConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Create a fault sensor for each air conditioner."""
-    coordinator: SharpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     seen: set[str] = set()
 
     def _add() -> None:
@@ -48,6 +49,7 @@ class SharpFaultSensor(CoordinatorEntity[SharpCoordinator], BinarySensorEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "fault"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: SharpCoordinator, key: str) -> None:
         """Bind the sensor to one unit."""

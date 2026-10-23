@@ -11,13 +11,13 @@ from homeassistant.components.climate import (
     ClimateEntityFeature,
     HVACMode,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PRECISION_HALVES, PRECISION_WHOLE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import SharpConfigEntry
 from .const import (
     DOMAIN,
     FAN_MODES,
@@ -55,11 +55,11 @@ _MODE = {hvac: mode for mode, hvac in _HVAC.items()}
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: SharpConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Create a climate entity for each air conditioner."""
-    coordinator: SharpCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     seen: set[str] = set()
 
     def _add() -> None:
@@ -96,8 +96,6 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         HVACMode.AUTO,
     ]
     _attr_fan_modes: ClassVar[list[str]] = [name for name, _code in FAN_MODES]
-    _attr_swing_modes: ClassVar[list[str]] = [name for name, _code in VANE_VERTICAL]
-    _attr_swing_horizontal_modes: ClassVar[list[str]] = [name for name, _code in VANE_HORIZONTAL]
 
     def __init__(self, coordinator: SharpCoordinator, key: str) -> None:
         """Bind the entity to one unit."""
@@ -126,14 +124,14 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
 
     @property
     def supported_features(self) -> ClimateEntityFeature:
-        """Fan and both vanes always; setpoint only in modes that use one."""
+        """Fan always. Vanes only when experimental controls are on."""
         features = (
             ClimateEntityFeature.FAN_MODE
-            | ClimateEntityFeature.SWING_MODE
-            | ClimateEntityFeature.SWING_HORIZONTAL_MODE
             | ClimateEntityFeature.TURN_ON
             | ClimateEntityFeature.TURN_OFF
         )
+        if self.coordinator.experimental:
+            features |= ClimateEntityFeature.SWING_MODE | ClimateEntityFeature.SWING_HORIZONTAL_MODE
         device = self._device
         if device is not None and mode_has_setpoint(device):
             features |= ClimateEntityFeature.TARGET_TEMPERATURE
@@ -141,16 +139,30 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
 
     @property
     def precision(self) -> float:
-        """Half degrees when the unit's capability blob allows them."""
+        """Whole degrees unless experimental half-degree control is enabled."""
         device = self._device
-        if device is not None and device.caps.half_degree:
+        if self.coordinator.experimental and device is not None and device.caps.half_degree:
             return PRECISION_HALVES
         return PRECISION_WHOLE
 
     @property
     def target_temperature_step(self) -> float:
-        """Same step the precision uses."""
+        """One degree by default. Half degrees are experimental."""
         return self.precision
+
+    @property
+    def swing_modes(self) -> list[str] | None:
+        """Vertical vane positions. Hidden until experimental controls are on."""
+        if not self.coordinator.experimental:
+            return None
+        return [name for name, _code in VANE_VERTICAL]
+
+    @property
+    def swing_horizontal_modes(self) -> list[str] | None:
+        """Horizontal vane positions. Hidden until experimental controls are on."""
+        if not self.coordinator.experimental:
+            return None
+        return [name for name, _code in VANE_HORIZONTAL]
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -219,30 +231,33 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
+        target = float(temperature)
+        half_degree = self.coordinator.experimental and device.caps.half_degree
+        if not half_degree:
+            target = float(round(target))
         status = cmd_setpoint(
-            float(temperature),
-            half_degree=device.caps.half_degree,
+            target,
+            half_degree=half_degree,
             frame_end=device.frame_end,
         )
-        snapped = round(float(temperature) * 2) / 2
-        await self.coordinator.async_send(self._key, status, setpoint=snapped)
+        await self.coordinator.async_send(self._key, status, setpoint=target)
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set the fan speed."""
         await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set the vertical vane."""
+        """Set the vertical vane. This FA-frame write is experimental."""
         device = self._device
-        if device is None:
+        if device is None or not self.coordinator.experimental:
             return
         status = cmd_vanes(vertical=swing_mode, horizontal=None, frame_end=device.frame_end)
         await self.coordinator.async_send(self._key, status, vane_vertical=swing_mode)
 
     async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
-        """Set the horizontal vane."""
+        """Set the horizontal vane. This FA-frame write is experimental."""
         device = self._device
-        if device is None:
+        if device is None or not self.coordinator.experimental:
             return
         status = cmd_vanes(
             vertical=None,

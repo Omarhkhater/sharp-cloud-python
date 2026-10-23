@@ -299,8 +299,12 @@ class Aircon:
 
     @property
     def unique_key(self) -> str:
-        """Stable id for the entity registry. Stored by HA, never logged."""
-        return f"{self.box_id}|{self.echonet_object}|{self.device_id}"
+        """Stable id for the entity registry.
+
+        ``deviceId`` is assigned by the cloud and stays with the indoor unit.
+        The box URL is not part of it.
+        """
+        return f"{self.device_id}|{self.echonet_object}"
 
 
 def mode_has_setpoint(device: Aircon) -> bool:
@@ -548,6 +552,57 @@ def aircon_from_record(box_id: str | None, item: dict) -> Aircon | None:
         model=str(model) if model else None,
         props=props,
     )
+
+
+def terminal_listed(info: object, terminal_app_id: str) -> bool:
+    """True when ``terminalAppInfo`` already contains this terminal id."""
+    if isinstance(info, str):
+        return info == terminal_app_id
+    if isinstance(info, dict):
+        if info.get("terminalAppId") == terminal_app_id:
+            return True
+        return any(terminal_listed(value, terminal_app_id) for value in info.values())
+    if isinstance(info, list):
+        return any(terminal_listed(item, terminal_app_id) for item in info)
+    return False
+
+
+def _box_records(payload: dict) -> list[tuple[str, dict]]:
+    """Box id plus the object that carries ``terminalAppInfo``."""
+    if "box" in payload:
+        return [
+            (str(box["boxId"]), box)
+            for box in payload.get("box") or []
+            if isinstance(box, dict) and box.get("boxId")
+        ]
+    return [
+        (str(item["boxId"]), item)
+        for item in payload.get("devices") or []
+        if isinstance(item, dict) and item.get("boxId")
+    ]
+
+
+def boxes_missing_terminal(payload: dict, terminal_app_id: str | None) -> list[str]:
+    """Box ids that do not already list this terminal.
+
+    A missing ``terminalAppInfo`` means the terminal is not paired. Pairing is
+    skipped only when the id is actually present.
+    """
+    missing: list[str] = []
+    for box_id, record in _box_records(payload):
+        if terminal_app_id and terminal_listed(record.get("terminalAppInfo"), terminal_app_id):
+            continue
+        if box_id not in missing:
+            missing.append(box_id)
+    return missing
+
+
+def box_lists_terminal(payload: dict, box_id: str, terminal_app_id: str) -> bool:
+    """True when one box's ``terminalAppInfo`` contains this terminal."""
+    for found_id, record in _box_records(payload):
+        if found_id == box_id and terminal_listed(record.get("terminalAppInfo"), terminal_app_id):
+            return True
+    return False
 
 
 def split_box_info(payload: dict) -> tuple[list[str], list[Aircon]]:
