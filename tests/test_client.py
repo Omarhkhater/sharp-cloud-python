@@ -32,7 +32,7 @@ from custom_components.sharp_cocoro_air.const import (
     DOMAIN,
 )
 from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
-from custom_components.sharp_cocoro_air.protocol import Aircon, cmd_setpoint
+from custom_components.sharp_cocoro_air.protocol import Aircon, cmd_setpoint, cmd_vanes
 
 
 class FakeCloud:
@@ -440,6 +440,9 @@ async def test_empty_control_is_rejected_before_the_cloud():
     try:
         with pytest.raises(ValueError, match="at least one property"):
             await client.send_control(device, [])
+        blank = cmd_vanes(vertical=None, horizontal=None, frame_end=80)
+        with pytest.raises(ValueError, match="empty FA"):
+            await client.send_control(device, blank)
     finally:
         await client.aclose()
 

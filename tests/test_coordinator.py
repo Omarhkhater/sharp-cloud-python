@@ -105,8 +105,20 @@ async def test_success_schedules_one_status_refresh(hass):
         await coordinator.async_shutdown()
 
 
-async def test_unmatch_schedules_one_status_refresh(hass):
-    """An FA unmatch is still a rejection, and status is read 15 seconds later."""
+async def test_unmatch_schedules_one_status_refresh(hass, monkeypatch):
+    """An FA unmatch is confirmed by status and is not sent again.
+
+    The confirm read happens during the send. The 15-second refresh still runs
+    afterwards, outside the box lock.
+    """
+
+    async def pause(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.sharp_cocoro_air.coordinator._pause",
+        pause,
+    )
     cloud = _Cloud("unmatch")
     coordinator, device = _coordinator(hass, cloud)
     recorded: list[tuple[float, bool]] = []
@@ -122,8 +134,10 @@ async def test_unmatch_schedules_one_status_refresh(hass):
 
         assert recorded == [(15, False)]
         assert len(cloud.sent) == 1
-        await _advance(hass, 20)
         assert cloud.box_reads == 1
+        assert coordinator.data[device.unique_key].vane_vertical is None
+        await _advance(hass, 20)
+        assert cloud.box_reads == 2
         assert len(cloud.sent) == 1
     finally:
         await coordinator.async_shutdown()

@@ -3,7 +3,8 @@
 Writes for one box are queued on that box's lock. Polls use a different lock,
 so a status read is not stuck behind controlResult. An unmatch on a single-value
 power, mode, fan, setpoint, or Plasmacluster write is checked against a later
-status read and sent at most once more. FA frames are never retried.
+status read and sent at most once more. An FA unmatch is confirmed with one
+status read and is not sent again.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from .const import (
     CONF_COOKIES,
     CONF_EXPERIMENTAL,
     DOMAIN,
+    FA_VERIFY_S,
     OUTDOOR_HOLD_S,
     PENDING_GRACE_S,
     RETRY_EPCS,
@@ -71,6 +73,16 @@ def _can_retry(status: list[dict]) -> bool:
         if code not in RETRY_EPCS or prop.get("valueType") not in _SINGLE_VALUE_TYPES:
             return False
     return True
+
+
+def _is_fa(status: list[dict]) -> bool:
+    """True when the command is only an FA frame. Those are confirmed, not resent."""
+    if not status:
+        return False
+    return all(
+        str(prop.get("statusCode", "")).lower() == "fa" and prop.get("valueType") == "valueBinary"
+        for prop in status
+    )
 
 
 def _matches(device: Aircon, updates: dict[str, Any]) -> bool:
@@ -207,8 +219,9 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         """Send a command for one box, then refresh status outside every lock.
 
         Unmatch on a retryable single-value write is verified after the unit has
-        had time to apply it, and sent once more if it did not. The 15-second
-        status read is never awaited while a lock is held.
+        had time to apply it, and sent once more if it did not. An FA unmatch is
+        confirmed with one status read and is not sent again. The 15-second
+        refresh is never awaited while a lock is held.
         """
         if not self.data or key not in self.data:
             raise HomeAssistantError("That air conditioner is not available")
@@ -223,7 +236,9 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                     except SharpBusy:
                         await _pause(_BUSY_RETRY_S)
                         result = await self.client.send_control(device, status)
-                    if result == "unmatch" and _can_retry(status):
+                    if result == "unmatch" and _is_fa(status):
+                        result = await self._confirm_fa(device, updates)
+                    elif result == "unmatch" and _can_retry(status):
                         result = await self._verify_or_resend(device, status, updates)
                 finally:
                     self._last_result_at[box_id] = _monotonic()
@@ -272,6 +287,20 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         if current is not None and _matches(current, updates):
             return "verified"
         return await self.client.send_control(device, status)
+
+    async def _confirm_fa(self, device: Aircon, updates: dict[str, Any]) -> str:
+        """Read status after an FA unmatch. The frame is not sent again.
+
+        Caller holds this box's lock. A reading that does not show the write
+        stays ``unmatch`` so the caller raises and leaves the previous state.
+        """
+        await _pause(FA_VERIFY_S)
+        payload = await self.client.box_info()
+        _box_ids, devices = split_box_info(payload)
+        current = next((item for item in devices if item.unique_key == device.unique_key), None)
+        if current is not None and updates and _matches(current, updates):
+            return "verified"
+        return "unmatch"
 
     def _apply_optimistic(self, key: str, updates: dict[str, Any]) -> None:
         """Show the write now, and keep it across a stale poll for a short while."""

@@ -34,6 +34,7 @@ from .const import (
     POWER_OFF,
     POWER_ON,
     VANE_HORIZONTAL,
+    VANE_HORIZONTAL_OFFERED,
     VANE_VERTICAL,
 )
 
@@ -49,6 +50,9 @@ _MODE_BY_CODE = {code: name for name, code in MODES}
 _FAN_BY_CODE = {code: name for name, code in FAN_MODES}
 _VANE_V_BY_CODE = {code.upper(): name for name, code in VANE_VERTICAL}
 _VANE_H_BY_CODE = {code.upper(): name for name, code in VANE_HORIZONTAL}
+_VERTICAL_MODES = tuple(name for name, _code in VANE_VERTICAL)
+# F0 bytes 10, 11, and 12 are the horizontal positions this model lists.
+_HORIZONTAL_CAPABILITY_OFFSETS = (10, 11, 12)
 
 # BB and BE. 0x7E, 0x7F, and 0x80 mean the unit has no reading.
 # Other bytes are signed: 0xF6 is -10 °C.
@@ -267,6 +271,27 @@ class Capabilities:
     auto_has_setpoint: bool = False
     a04: bool = False
     patrol: bool = False
+    vertical_vanes: tuple[str, ...] = ()
+    horizontal_vanes: tuple[str, ...] = ()
+
+
+def _horizontal_from_capability(blob: bytes) -> tuple[str, ...]:
+    """Positions listed in the capability bytes, limited to the stable set.
+
+    Wide, auto, and enclose are not offered. Swing is included when the unit
+    lists at least one fixed position, because a live swing applied even
+    though that code is not one of the three capability bytes.
+    """
+    listed: list[str] = []
+    for offset in _HORIZONTAL_CAPABILITY_OFFSETS:
+        if offset >= len(blob):
+            continue
+        name = _VANE_H_BY_CODE.get(f"{blob[offset]:02X}")
+        if name in VANE_HORIZONTAL_OFFERED and name != "swing" and name not in listed:
+            listed.append(name)
+    if not listed:
+        return ()
+    return tuple(name for name in VANE_HORIZONTAL_OFFERED if name == "swing" or name in listed)
 
 
 @dataclass
@@ -338,6 +363,8 @@ def parse_capabilities(blob: bytes | None) -> Capabilities:
         auto_has_setpoint=blob[13] == 0x05,
         a04=len(blob) > 29 and blob[29] >= 0x38,
         patrol=blob[6] == 0x41,
+        vertical_vanes=_VERTICAL_MODES,
+        horizontal_vanes=_horizontal_from_capability(blob),
     )
 
 

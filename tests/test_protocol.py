@@ -10,6 +10,7 @@ import pytest
 
 from custom_components.sharp_cocoro_air.const import APP_SECRET, B2C_CLIENT_ID
 from custom_components.sharp_cocoro_air.protocol import (
+    Capabilities,
     ControlFrame,
     aircon_from_record,
     authorize_url,
@@ -24,6 +25,7 @@ from custom_components.sharp_cocoro_air.protocol import (
     control_body,
     device_diagnostics,
     extract_auth_code,
+    parse_capabilities,
     parse_echonet_property,
     split_box_info,
     with_updates,
@@ -58,6 +60,11 @@ def test_fixture_matches_the_live_decode(boxinfo):
     assert living.energy_kwh == pytest.approx(2367.458)
     assert living.fault is False
     assert living.caps.half_degree is True
+    assert living.caps.vertical_vanes[0] == "auto"
+    assert "down" in living.caps.vertical_vanes
+    assert living.caps.horizontal_vanes == ("straight", "left", "right", "swing")
+    assert "wide" not in living.caps.horizontal_vanes
+    assert "auto" not in living.caps.horizontal_vanes
     assert living.caps.soft is False
     assert living.caps.speed is False
     assert living.caps.cocoro is False
@@ -296,6 +303,30 @@ def test_half_degree_setpoint_uses_the_fa_frame_only():
         cmd_setpoint(26.5, half_degree=False, frame_end=80)
 
 
+def test_horizontal_modes_follow_the_capability_bytes():
+    """Bytes 10-12 select straight, left, and right. Swing is added. Wide is not."""
+    listed = bytearray(32)
+    listed[10] = 0x01
+    listed[11] = 0x02
+    listed[12] = 0x03
+    caps = parse_capabilities(bytes(listed))
+    assert caps.horizontal_vanes == ("straight", "left", "right", "swing")
+    assert caps.vertical_vanes
+
+    only_straight = bytearray(32)
+    only_straight[10] = 0x01
+    assert parse_capabilities(bytes(only_straight)).horizontal_vanes == ("straight", "swing")
+
+    wide = bytearray(32)
+    wide[10] = 0x07
+    wide[11] = 0x0A
+    wide[12] = 0x08
+    assert parse_capabilities(bytes(wide)).horizontal_vanes == ()
+
+    assert parse_capabilities(bytes(16)).horizontal_vanes == ()
+    assert Capabilities().horizontal_vanes == ()
+
+
 def test_vane_indexes_follow_the_fixture_not_section_42(boxinfo):
     """Vanes are 1-based indexes 49 and 50.
 
@@ -475,7 +506,7 @@ def test_package_metadata():
     ).read_text()
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["config_flow"] is True
-    assert manifest["version"] == "0.2.3"
+    assert manifest["version"] == "0.3.0"
     assert manifest["name"] == "Sharp Air Egypt"
     assert manifest["domain"] == "sharp_cocoro_air"
     assert manifest["documentation"] == "https://github.com/Omarhkhater/sharp-cloud-python"
@@ -485,7 +516,7 @@ def test_package_metadata():
     assert hacs["name"] == "Sharp Air Egypt"
     assert strings == translations
     assert "Sharp Air Egypt" in strings
-    assert "Enable experimental controls" in strings
+    assert "Show untested controls" in strings
     assert "password" not in strings.lower()
     assert hacs["homeassistant"] == "2025.1.0"
     readme = (ROOT / "README.md").read_text()
@@ -494,6 +525,7 @@ def test_package_metadata():
     assert "https://github.com/Omarhkhater/sharp-cloud-python" in readme
     assert "sharp-air-egypt-ha" not in readme
     assert "sharp-air-egypt-ha" not in changelog
+    assert 'version = "0.3.0"' in (ROOT / "pyproject.toml").read_text()
 
 
 def test_brand_logo_is_the_supplied_png():

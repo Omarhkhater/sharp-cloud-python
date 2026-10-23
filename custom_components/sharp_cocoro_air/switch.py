@@ -1,4 +1,4 @@
-"""Plasmacluster, sleep, and the capability-gated FA flags."""
+"""Plasmacluster, and the capability-gated FA flags that are still untested."""
 
 from __future__ import annotations
 
@@ -16,14 +16,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import SharpConfigEntry
 from .const import DOMAIN, MANUFACTURER
 from .coordinator import SharpCoordinator
-from .protocol import (
-    Aircon,
-    cmd_cocoro,
-    cmd_plasmacluster,
-    cmd_sleep,
-    cmd_soft,
-    cmd_speed,
-)
+from .protocol import Aircon, cmd_cocoro, cmd_plasmacluster, cmd_soft
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -50,14 +43,6 @@ SWITCHES: tuple[SharpSwitchDescription, ...] = (
         field="plasmacluster",
     ),
     SharpSwitchDescription(
-        key="sleep",
-        translation_key="sleep",
-        is_on_fn=lambda device: device.sleep,
-        command_fn=_fa_command(cmd_sleep),
-        field="sleep",
-        experimental=True,
-    ),
-    SharpSwitchDescription(
         key="soft",
         translation_key="soft",
         is_on_fn=lambda device: device.soft,
@@ -65,15 +50,6 @@ SWITCHES: tuple[SharpSwitchDescription, ...] = (
         field="soft",
         experimental=True,
         supported=lambda device: device.caps.soft,
-    ),
-    SharpSwitchDescription(
-        key="speed",
-        translation_key="speed",
-        is_on_fn=lambda device: device.speed,
-        command_fn=_fa_command(cmd_speed),
-        field="speed",
-        experimental=True,
-        supported=lambda device: device.caps.speed,
     ),
     SharpSwitchDescription(
         key="cocoro_air",
@@ -88,6 +64,8 @@ SWITCHES: tuple[SharpSwitchDescription, ...] = (
 )
 
 _EXPERIMENTAL_KEYS = tuple(item.key for item in SWITCHES if item.experimental)
+# Sleep never applied, and its off frame was rejected. Speed was not confirmed.
+_REMOVED_KEYS = ("sleep", "speed")
 
 
 async def async_setup_entry(
@@ -97,6 +75,7 @@ async def async_setup_entry(
 ) -> None:
     """Create the switches each unit actually supports."""
     coordinator = entry.runtime_data
+    _drop_switches(hass, entry, _REMOVED_KEYS)
     _retire_experimental(hass, entry, coordinator)
     seen: set[str] = set()
 
@@ -125,16 +104,21 @@ async def async_setup_entry(
 def _retire_experimental(
     hass: HomeAssistant, entry: SharpConfigEntry, coordinator: SharpCoordinator
 ) -> None:
-    """Remove FA-frame switches when the option is turned back off."""
+    """Remove Soft and Cocoro Air when the option is turned back off."""
     if coordinator.experimental:
         return
+    _drop_switches(hass, entry, _EXPERIMENTAL_KEYS)
+
+
+def _drop_switches(hass: HomeAssistant, entry: SharpConfigEntry, keys: tuple[str, ...]) -> None:
+    """Remove switch entities whose unique id ends with one of ``keys``."""
     registry = er.async_get(hass)
     for entity in list(registry.entities.values()):
         if entity.config_entry_id != entry.entry_id or entity.domain != "switch":
             continue
         if not entity.unique_id:
             continue
-        for key in _EXPERIMENTAL_KEYS:
+        for key in keys:
             if entity.unique_id.endswith(f"_{key}"):
                 registry.async_remove(entity.entity_id)
                 break

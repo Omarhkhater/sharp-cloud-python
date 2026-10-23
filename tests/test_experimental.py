@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 from homeassistant.components.climate import ClimateEntityFeature
-from homeassistant.const import PRECISION_HALVES, PRECISION_WHOLE, EntityCategory
+from homeassistant.const import PRECISION_HALVES, EntityCategory
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -45,7 +45,7 @@ def test_cocoro_switch_is_config_and_experimental():
 
 
 async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
-    """Default setup is whole degrees and no FA switches. The option reveals them."""
+    """Vanes and half degrees are on. Soft stays hidden until the option is on."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="user-1",
@@ -57,6 +57,28 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         },
     )
     entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "climate",
+        DOMAIN,
+        "1|013001",
+        suggested_object_id="living_room_ac",
+        config_entry=entry,
+    )
+    registry.async_get_or_create(
+        "switch",
+        DOMAIN,
+        "1|013001_sleep",
+        suggested_object_id="living_room_ac_sleep",
+        config_entry=entry,
+    )
+    registry.async_get_or_create(
+        "switch",
+        DOMAIN,
+        "1|013001_speed",
+        suggested_object_id="living_room_ac_speed",
+        config_entry=entry,
+    )
     with (
         patch(
             "custom_components.sharp_cocoro_air.client.SharpClient.box_info",
@@ -71,13 +93,16 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         await hass.async_block_till_done()
 
         climate = _climate(hass, "1|013001")
-        assert climate.precision == PRECISION_WHOLE
-        assert climate.target_temperature_step == 1
+        assert climate.entity_id == "climate.living_room_ac"
+        assert climate.precision == PRECISION_HALVES
+        assert climate.target_temperature_step == PRECISION_HALVES
         assert climate.min_temp == 16
         assert climate.max_temp == 30
-        assert ClimateEntityFeature.SWING_MODE not in climate.supported_features
-        assert ClimateEntityFeature.SWING_HORIZONTAL_MODE not in climate.supported_features
-        assert climate.swing_modes is None
+        assert ClimateEntityFeature.SWING_MODE in climate.supported_features
+        assert ClimateEntityFeature.SWING_HORIZONTAL_MODE in climate.supported_features
+        assert climate.swing_modes is not None
+        assert "down" in climate.swing_modes
+        assert climate.swing_horizontal_modes == ["straight", "left", "right", "swing"]
         assert ClimateEntityFeature.FAN_MODE in climate.supported_features
         assert ClimateEntityFeature.TARGET_TEMPERATURE in climate.supported_features
         assert "rapid" not in climate.fan_modes
@@ -86,6 +111,7 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         assert "1|013001_plasmacluster" in unique_ids
         assert "1|013001_super_jet" in unique_ids
         assert "1|013001_sleep" not in unique_ids
+        assert "1|013001_speed" not in unique_ids
         assert "1|013001_soft" not in unique_ids
         super_jet = next(
             entity
@@ -137,24 +163,24 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         await hass.async_block_till_done()
 
         climate = _climate(hass, "1|013001")
+        assert climate.entity_id == "climate.living_room_ac"
         assert climate.precision == PRECISION_HALVES
-        assert climate.target_temperature_step == PRECISION_HALVES
-        assert climate.fan_modes[-1] == "rapid"
-        assert ClimateEntityFeature.SWING_MODE in climate.supported_features
-        assert ClimateEntityFeature.SWING_HORIZONTAL_MODE in climate.supported_features
-        assert climate.swing_modes is not None
+        assert "rapid" not in climate.fan_modes
+        assert climate.swing_horizontal_modes == ["straight", "left", "right", "swing"]
         unique_ids = _unique_ids(hass, entry.entry_id)
-        assert "1|013001_sleep" in unique_ids
-        assert "1|013001_soft" not in unique_ids
+        assert "1|013001_sleep" not in unique_ids
         assert "1|013001_speed" not in unique_ids
+        assert "1|013001_soft" not in unique_ids
         assert "1|013001_cocoro_air" not in unique_ids
 
         hass.config_entries.async_update_entry(entry, options={CONF_EXPERIMENTAL: False})
         await hass.async_block_till_done()
         unique_ids = _unique_ids(hass, entry.entry_id)
         assert "1|013001_sleep" not in unique_ids
+        assert "1|013001_speed" not in unique_ids
         assert "1|013001_plasmacluster" in unique_ids
         assert "1|013001_super_jet" in unique_ids
+        assert _climate(hass, "1|013001").entity_id == "climate.living_room_ac"
         assert "rapid" not in _climate(hass, "1|013001").fan_modes
 
     pair.assert_awaited()
@@ -194,6 +220,92 @@ async def test_rejected_pairing_is_not_retried_on_later_polls(hass, boxinfo):
         assert len(calls) == 6
     finally:
         await client.aclose()
+
+
+def _soft_box() -> dict:
+    """One unit whose capability byte says Soft exists, and Rapid (0x38) too."""
+    fa = bytearray(80)
+    capabilities = bytearray(32)
+    capabilities[4] = 0x21
+    capabilities[8] = 0x20
+    capabilities[10] = 0x01
+    capabilities[11] = 0x02
+    capabilities[12] = 0x03
+    capabilities[29] = 0x38
+    props = (
+        (0x80, bytes([0x30])),
+        (0xB0, bytes([0x42])),
+        (0xF0, bytes(capabilities)),
+        (0xFA, bytes(fa)),
+    )
+    body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
+    for epc, edt in props:
+        body.append(epc)
+        body.append(len(edt))
+        body.extend(edt)
+    return {
+        "devices": [
+            {
+                "boxId": "box-1",
+                "deviceId": 1,
+                "echonetNode": "00-11-22-33-44-55",
+                "echonetObject": "013001",
+                "model": "AY-XP12YHE",
+                "labelData": {"deviceType": "AIR_CON", "name": "Living Room"},
+                "echonetProperty": body.hex(),
+            }
+        ]
+    }
+
+
+async def test_untested_switch_keeps_its_entity_id(hass):
+    """A Soft switch that was already registered keeps that entity id."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "terminal_app_id": "https://example.invalid/terminal/1",
+            "user_id": "user-1",
+            "cookies": COOKIES,
+        },
+        options={CONF_EXPERIMENTAL: True},
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    registry.async_get_or_create(
+        "switch",
+        DOMAIN,
+        "1|013001_soft",
+        suggested_object_id="old_soft_name",
+        config_entry=entry,
+    )
+    registry.async_get_or_create(
+        "switch",
+        DOMAIN,
+        "1|013001_sleep",
+        suggested_object_id="old_sleep_name",
+        config_entry=entry,
+    )
+    with (
+        patch(
+            "custom_components.sharp_cocoro_air.client.SharpClient.box_info",
+            new=AsyncMock(return_value=_soft_box()),
+        ),
+        patch(
+            "custom_components.sharp_cocoro_air.client.SharpClient.pair",
+            new=AsyncMock(),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    soft = registry.async_get_entity_id("switch", DOMAIN, "1|013001_soft")
+    assert soft == "switch.old_soft_name"
+    assert registry.async_get_entity_id("switch", DOMAIN, "1|013001_sleep") is None
+    assert registry.async_get_entity_id("switch", DOMAIN, "1|013001_speed") is None
+    climate = _climate(hass, "1|013001")
+    assert climate.fan_modes[-1] == "rapid"
+    assert "sleep" not in {item.key for item in SWITCHES}
+    assert "speed" not in {item.key for item in SWITCHES}
 
 
 def _climate(hass, unique_id):

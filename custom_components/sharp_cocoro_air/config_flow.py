@@ -114,15 +114,15 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry) -> SharpOptionsFlow:
-        """Experimental FA-frame controls are off until the user enables them."""
+        """Soft and Cocoro Air stay off until the user enables them."""
         return SharpOptionsFlow()
 
 
 class SharpOptionsFlow(OptionsFlow):
-    """One toggle for the FA-frame controls that were not confirmed live."""
+    """One toggle for Soft and Cocoro Air. The option key is unchanged."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Ask whether to show half degrees, vanes, and the FA switches."""
+        """Ask whether to show the controls that were not confirmed live."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
         enabled = bool(self.config_entry.options.get(CONF_EXPERIMENTAL, False))

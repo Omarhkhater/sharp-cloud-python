@@ -32,9 +32,9 @@
     "step": {
       "init": {
         "title": "Sharp Air Egypt options",
-        "description": "Experimental controls send commands that were not confirmed on a live unit. Half-degree temperatures, vane positions, the Rapid fan speed, Sleep, Soft, Speed and Cocoro Air stay hidden while this is off. Rapid was rejected by a live unit.",
+        "description": "Soft and Cocoro Air were not confirmed on a live unit. They stay hidden while this is off. Vanes and half-degree temperatures follow each unit and stay available.",
         "data": {
-          "experimental_controls": "Enable experimental controls"
+          "experimental_controls": "Show untested controls"
         }
       }
     }
@@ -99,14 +99,8 @@
       "plasmacluster": {
         "name": "Plasmacluster"
       },
-      "sleep": {
-        "name": "Sleep"
-      },
       "soft": {
         "name": "Soft"
-      },
-      "speed": {
-        "name": "Speed"
       },
       "cocoro_air": {
         "name": "Cocoro Air"

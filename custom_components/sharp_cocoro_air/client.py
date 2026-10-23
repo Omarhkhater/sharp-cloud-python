@@ -35,6 +35,17 @@ _LOGGER = logging.getLogger(__name__)
 _BUSY_CODES = {"E1001001", "E1001002"}
 
 
+def _fa_frame_is_blank(status: list[dict]) -> bool:
+    """True when an FA payload is all zeros. The cloud answers that with E1004001."""
+    for prop in status:
+        if prop.get("valueType") != "valueBinary":
+            continue
+        code = str((prop.get("valueBinary") or {}).get("code") or "")
+        if code and set(code.lower()) <= {"0"}:
+            return True
+    return False
+
+
 class SharpError(Exception):
     """Base error. The message never includes cookies, ids, or request URLs."""
 
@@ -460,6 +471,8 @@ class SharpClient:
         """
         if not status:
             raise ValueError("A control needs at least one property")
+        if _fa_frame_is_blank(status):
+            raise ValueError("An empty FA frame is rejected by the cloud")
         started = time.monotonic()
         body = control_body(device.device_id, device.echonet_node, device.echonet_object, status)
         try:
