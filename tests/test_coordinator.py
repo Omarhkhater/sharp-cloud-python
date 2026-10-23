@@ -19,9 +19,14 @@ from custom_components.sharp_cocoro_air.client import (
     SharpAPIError,
     SharpAuthError,
     SharpConnectionError,
+    SharpTerminalRefused,
 )
 from custom_components.sharp_cocoro_air.const import DOMAIN
-from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
+from custom_components.sharp_cocoro_air.coordinator import (
+    _AUTH_FAILURES,
+    SharpCoordinator,
+    clear_auth_failures,
+)
 from custom_components.sharp_cocoro_air.protocol import Aircon
 
 _STATUS = [{"statusCode": "a0", "valueType": "valueSingle", "valueSingle": {"code": "41"}}]
@@ -104,8 +109,20 @@ async def test_success_schedules_one_status_refresh(hass):
         await coordinator.async_shutdown()
 
 
-async def test_unmatch_schedules_one_status_refresh(hass):
-    """An FA unmatch is still a rejection, and status is read 15 seconds later."""
+async def test_unmatch_schedules_one_status_refresh(hass, monkeypatch):
+    """An FA unmatch is confirmed by status and is not sent again.
+
+    The confirm read happens during the send. The 15-second refresh still runs
+    afterwards, outside the box lock.
+    """
+
+    async def pause(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.sharp_cocoro_air.coordinator._pause",
+        pause,
+    )
     cloud = _Cloud("unmatch")
     coordinator, device = _coordinator(hass, cloud)
     recorded: list[tuple[float, bool]] = []
@@ -115,14 +132,16 @@ async def test_unmatch_schedules_one_status_refresh(hass):
                 "custom_components.sharp_cocoro_air.coordinator.async_call_later",
                 side_effect=_spy(coordinator, recorded),
             ),
-            pytest.raises(HomeAssistantError, match="rejected the command"),
+            pytest.raises(HomeAssistantError, match="couldn't be confirmed"),
         ):
             await coordinator.async_send(device.unique_key, _FA, vane_vertical="swing")
 
         assert recorded == [(15, False)]
         assert len(cloud.sent) == 1
-        await _advance(hass, 20)
         assert cloud.box_reads == 1
+        assert coordinator.data[device.unique_key].vane_vertical is None
+        await _advance(hass, 20)
+        assert cloud.box_reads == 2
         assert len(cloud.sent) == 1
     finally:
         await coordinator.async_shutdown()
@@ -203,12 +222,129 @@ async def test_successful_poll_resets_the_auth_failure_count(hass):
 
 async def test_refused_terminal_login_reauths_immediately(hass):
     """A refused terminal id does not wait for three polls."""
-    cloud = _AuthCloud(SharpAuthError("terminal login refused"))
+    cloud = _AuthCloud(SharpTerminalRefused())
     coordinator = _auth_coordinator(hass, cloud)
     try:
         with pytest.raises(ConfigEntryAuthFailed):
             await coordinator._async_update_data()
+        assert coordinator._auth_failures == 0
+        assert coordinator.entry.entry_id not in hass.data.get(_AUTH_FAILURES, {})
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_the_refusal_message_alone_does_not_skip_the_grace(hass):
+    """Reauth matches SharpTerminalRefused, not the message text."""
+    cloud = _AuthCloud(SharpAuthError("terminal login refused"))
+    coordinator = _auth_coordinator(hass, cloud)
+    try:
+        with pytest.raises(UpdateFailed):
+            await coordinator._async_update_data()
         assert coordinator._auth_failures == 1
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_auth_failures_carry_across_a_new_setup(hass):
+    """A setup retry builds a new coordinator and still counts the earlier polls."""
+    cloud = _AuthCloud(SharpAuthError("Sharp sign-in expired"))
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    first = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(UpdateFailed):
+            await first._async_update_data()
+    finally:
+        await first.async_shutdown()
+
+    second = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(UpdateFailed):
+            await second._async_update_data()
+        assert second._auth_failures == 2
+    finally:
+        await second.async_shutdown()
+
+    third = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(ConfigEntryAuthFailed):
+            await third._async_update_data()
+    finally:
+        await third.async_shutdown()
+
+
+async def test_reauth_clears_the_count_so_one_later_failure_waits(hass):
+    """After the third rejection starts reauth, a later rejection waits again."""
+    cloud = _AuthCloud(SharpAuthError("Sharp sign-in expired"))
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    first = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        for _attempt in range(2):
+            with pytest.raises(UpdateFailed):
+                await first._async_update_data()
+        with pytest.raises(ConfigEntryAuthFailed):
+            await first._async_update_data()
+        assert first._auth_failures == 0
+    finally:
+        await first.async_shutdown()
+
+    second = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(UpdateFailed):
+            await second._async_update_data()
+        assert second._auth_failures == 1
+    finally:
+        await second.async_shutdown()
+
+
+async def test_unload_clears_a_failure_streak(hass):
+    """A reload drops the count. One rejection after that does not start reauth."""
+    cloud = _AuthCloud(SharpAuthError("Sharp sign-in expired"))
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    first = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        for _attempt in range(2):
+            with pytest.raises(UpdateFailed):
+                await first._async_update_data()
+        assert first._auth_failures == 2
+        clear_auth_failures(hass, entry.entry_id)
+    finally:
+        await first.async_shutdown()
+
+    second = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        with pytest.raises(UpdateFailed):
+            await second._async_update_data()
+        assert second._auth_failures == 1
+    finally:
+        await second.async_shutdown()
+
+
+async def test_failed_fa_read_back_still_schedules_a_refresh(hass, monkeypatch):
+    """A status read that errors still arms the refresh, and says it was not confirmed."""
+
+    async def pause(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "custom_components.sharp_cocoro_air.coordinator._pause",
+        pause,
+    )
+    cloud = _Cloud("unmatch")
+
+    async def fail_read() -> dict:
+        cloud.box_reads += 1
+        raise SharpConnectionError("Could not reach the Sharp cloud")
+
+    cloud.box_info = fail_read  # type: ignore[method-assign]
+    coordinator, device = _coordinator(hass, cloud)
+    try:
+        with pytest.raises(HomeAssistantError, match="couldn't be confirmed"):
+            await coordinator.async_send(device.unique_key, _FA, vane_vertical="swing")
+        assert coordinator._refresh_unsub is not None
+        assert len(cloud.sent) == 1
     finally:
         await coordinator.async_shutdown()
 

@@ -39,6 +39,9 @@ OUTDOOR_HOLD_S = 6 * 60 * 60
 SETPOINT_DEBOUNCE_S = 1.5
 WRITE_SETTLE_S = 2.0
 VERIFY_DELAY_S = 12.0
+# FA controlResult is unmatch even when the unit applied the frame.
+# One status read confirms it. The frame is not sent again.
+FA_VERIFY_S = 15.0
 PENDING_GRACE_S = 30.0
 # Single-value EPCs that may be sent once more after unmatch. FA frames are not.
 RETRY_EPCS = {"80", "b0", "a0", "b3", "cf"}
@@ -52,7 +55,8 @@ CONF_REDIRECT_URL = "redirect_url"
 CONF_TERMINAL_APP_ID = "terminal_app_id"
 CONF_COOKIES = "cookies"
 CONF_USER_ID = "user_id"
-# Off unless the user opts in. Covers FA-frame writes that were not confirmed live.
+# Same option key as before. Soft and Cocoro Air stay behind it.
+# Vanes and half degrees follow the unit's capability bytes instead.
 CONF_EXPERIMENTAL = "experimental_controls"
 
 # ECHONET operation-mode codes (EPC B0).
@@ -71,8 +75,7 @@ MODES: tuple[tuple[str, str], ...] = (
 )
 
 # EPC A0. Names follow the app's fan table.
-# Rapid (38) was rejected live: controlResult came back "unmatch", and the
-# unit briefly reported 37. It is not in the default list.
+# Rapid (38) is hidden when F0 byte 12 is 0x02 or 0x03. These units report 0x03.
 FAN_RAPID = "rapid"
 FAN_MODES: tuple[tuple[str, str], ...] = (
     ("auto", "41"),
@@ -97,6 +100,8 @@ VANE_VERTICAL: tuple[tuple[str, str], ...] = (
 
 # FA frame, 1-based index 50 (0-based byte 49). The captured frames put
 # horizontal straight (01) here, which is what section 4.4 specifies.
+# The capability bytes list straight, left, and right. Wide, auto, and
+# enclose are not in that list. Swing was confirmed live and is offered too.
 VANE_HORIZONTAL: tuple[tuple[str, str], ...] = (
     ("auto", "0A"),
     ("straight", "01"),
@@ -106,6 +111,7 @@ VANE_HORIZONTAL: tuple[tuple[str, str], ...] = (
     ("enclose", "08"),
     ("swing", "0F"),
 )
+VANE_HORIZONTAL_OFFERED: tuple[str, ...] = ("straight", "left", "right", "swing")
 
 POWER_ON = "30"
 POWER_OFF = "31"

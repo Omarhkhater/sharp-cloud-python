@@ -30,6 +30,7 @@ from .const import (
     CONF_USER_ID,
     DOMAIN,
 )
+from .coordinator import clear_auth_failures
 from .protocol import authorize_url, extract_auth_code
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> FlowResult:
         """Start a new browser sign-in for an existing entry."""
+        clear_auth_failures(self.hass, self._get_reauth_entry().entry_id)
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -110,19 +112,20 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(user_id)
         self._abort_if_unique_id_mismatch()
         account = await client.finish_setup(register=False)
+        clear_auth_failures(self.hass, entry.entry_id)
         return self.async_update_reload_and_abort(entry, data_updates=_entry_data(account))
 
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry) -> SharpOptionsFlow:
-        """Experimental FA-frame controls are off until the user enables them."""
+        """Soft and Cocoro Air stay off until the user enables them."""
         return SharpOptionsFlow()
 
 
 class SharpOptionsFlow(OptionsFlow):
-    """One toggle for the FA-frame controls that were not confirmed live."""
+    """One toggle for Soft and Cocoro Air. The option key is unchanged."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Ask whether to show half degrees, vanes, and the FA switches."""
+        """Ask whether to show the controls that were not confirmed live."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
         enabled = bool(self.config_entry.options.get(CONF_EXPERIMENTAL, False))

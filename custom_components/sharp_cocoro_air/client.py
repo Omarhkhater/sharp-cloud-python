@@ -19,6 +19,7 @@ from http.cookies import SimpleCookie
 
 import aiohttp
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from yarl import URL
 
@@ -28,11 +29,29 @@ from .protocol import (
     box_lists_terminal,
     boxes_missing_terminal,
     control_body,
+    fa_payload_is_blank,
 )
 
 _NONCE_ALPHABET = string.ascii_letters + string.digits
 _LOGGER = logging.getLogger(__name__)
 _BUSY_CODES = {"E1001001", "E1001002"}
+
+
+_EMPTY_PAYLOAD = (
+    "Sharp would reject that command because its payload is empty. "
+    "Wait for a status reading and try again."
+)
+
+
+def _fa_frame_is_blank(status: list[dict]) -> bool:
+    """True when an FA payload, ignoring the checksum and change map, is all zeros."""
+    for prop in status:
+        if prop.get("valueType") != "valueBinary":
+            continue
+        code = str((prop.get("valueBinary") or {}).get("code") or "")
+        if fa_payload_is_blank(code):
+            return True
+    return False
 
 
 class SharpError(Exception):
@@ -41,6 +60,17 @@ class SharpError(Exception):
 
 class SharpAuthError(SharpError):
     """The session was rejected and terminal-only login did not recover it."""
+
+
+class SharpTerminalRefused(SharpAuthError):
+    """The stored terminal id itself was rejected.
+
+    A later poll cannot repair this. The caller should start reauth.
+    """
+
+    def __init__(self) -> None:
+        """Use a stable message. Callers match the type, not the text."""
+        super().__init__("terminal login refused")
 
 
 class SharpConnectionError(SharpError):
@@ -312,7 +342,7 @@ class SharpClient:
                 allow_reauth=False,
             )
         except SharpAuthError:
-            raise SharpAuthError("terminal login refused") from None
+            raise SharpTerminalRefused() from None
 
     async def register_terminal(self, name: str = "Home Assistant") -> None:
         """Register this terminal so later logins can use the terminal id alone."""
@@ -449,6 +479,8 @@ class SharpClient:
         """
         if not status:
             raise ValueError("A control needs at least one property")
+        if _fa_frame_is_blank(status):
+            raise HomeAssistantError(_EMPTY_PAYLOAD)
         started = time.monotonic()
         body = control_body(device.device_id, device.echonet_node, device.echonet_object, status)
         try:

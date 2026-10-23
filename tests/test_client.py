@@ -10,6 +10,7 @@ import aiohttp
 import pytest
 import pytest_socket
 from aiohttp import web
+from homeassistant.exceptions import HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.sharp_cocoro_air import _async_reload_options
@@ -21,6 +22,7 @@ from custom_components.sharp_cocoro_air.client import (
     SharpClient,
     SharpConnectionError,
     SharpError,
+    SharpTerminalRefused,
     app_nonce,
 )
 from custom_components.sharp_cocoro_air.const import (
@@ -31,7 +33,7 @@ from custom_components.sharp_cocoro_air.const import (
     DOMAIN,
 )
 from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
-from custom_components.sharp_cocoro_air.protocol import Aircon, cmd_setpoint
+from custom_components.sharp_cocoro_air.protocol import Aircon, cmd_setpoint, cmd_soft, cmd_vanes
 
 
 class FakeCloud:
@@ -439,6 +441,14 @@ async def test_empty_control_is_rejected_before_the_cloud():
     try:
         with pytest.raises(ValueError, match="at least one property"):
             await client.send_control(device, [])
+        blank = cmd_vanes(vertical=None, horizontal=None, frame_end=80)
+        with pytest.raises(HomeAssistantError, match="payload is empty"):
+            await client.send_control(device, blank)
+        # The checksum and change map are not zero, but the payload is.
+        soft_off = cmd_soft(False, 80)
+        assert set(soft_off[0]["valueBinary"]["code"].lower()) - {"0"}
+        with pytest.raises(HomeAssistantError, match="payload is empty"):
+            await client.send_control(device, soft_off)
     finally:
         await client.aclose()
 
@@ -601,7 +611,7 @@ async def test_refused_terminal_login_is_not_retried():
     runner, base = await _serve(handle)
     client = await _client(base, "https://example.invalid/terminal/1")
     try:
-        with pytest.raises(SharpAuthError, match="terminal login refused"):
+        with pytest.raises(SharpTerminalRefused, match="terminal login refused"):
             await client.box_info()
         assert logins == 1
         assert box_hits == 1

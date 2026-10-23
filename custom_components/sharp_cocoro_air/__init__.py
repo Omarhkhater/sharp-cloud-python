@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 
 from .client import SharpClient, async_get_clientsession
 from .const import CONF_COOKIES, CONF_TERMINAL_APP_ID
-from .coordinator import SharpCoordinator
+from .coordinator import SharpCoordinator, clear_auth_failures
 
 PLATFORMS = [
     Platform.CLIMATE,
@@ -34,7 +34,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SharpConfigEntry) -> boo
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SharpConfigEntry) -> bool:
-    """Stop polling. Home Assistant closes the client session."""
+    """Stop polling and forget the sign-in failure count.
+
+    Home Assistant closes the client session. Setup retry does not come through
+    here, so a streak of rejected polls still reaches three.
+    """
+    clear_auth_failures(hass, entry.entry_id)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

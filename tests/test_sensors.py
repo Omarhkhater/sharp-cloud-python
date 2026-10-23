@@ -324,7 +324,7 @@ async def test_restored_outdoor_at_least_six_hours_old_is_not_seeded(hass, monke
 
 
 async def test_restored_outdoor_is_dated_from_last_reported(hass, monkeypatch):
-    """last_reported dates the reading. last_updated is only the fallback."""
+    """The restored reading is dated from last_reported."""
     clock = _Clock()
     monkeypatch.setattr(coordinator_mod, "_monotonic", clock.monotonic)
     device = _off_device()
@@ -349,4 +349,46 @@ async def test_restored_outdoor_is_dated_from_last_reported(hass, monkeypatch):
         assert fresh_report.extra_state_attributes["stale"] is True
     finally:
         await fresh_report.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_missing_last_reported_ignores_an_old_last_updated(hass, monkeypatch):
+    """A missing last_reported does not fall back to last_updated.
+
+    A real State always fills last_reported, so this uses a stand-in whose
+    last_updated is already older than 6 hours. Using that timestamp would
+    refuse to seed the reading.
+    """
+    clock = _Clock()
+    monkeypatch.setattr(coordinator_mod, "_monotonic", clock.monotonic)
+    device = _off_device()
+    coordinator = _coordinator(hass, _Cloud(_payload(power=0x31, outdoor=0x7E)))
+    coordinator.data = {device.unique_key: device}
+    sensor = _outdoor(coordinator)
+    sensor.entity_id = "sensor.living_room_outdoor_temperature"
+
+    class _Stored:
+        native_value = 26
+
+    class _State:
+        last_reported = None
+        last_updated = dt_util.utcnow() - timedelta(seconds=OUTDOOR_HOLD_S + 60)
+
+    async def last_sensor_data() -> _Stored:
+        return _Stored()
+
+    async def last_state() -> _State:
+        return _State()
+
+    sensor.async_get_last_sensor_data = last_sensor_data  # type: ignore[method-assign]
+    sensor.async_get_last_state = last_state  # type: ignore[method-assign]
+    await MockEntityPlatform(
+        hass, domain="sensor", platform_name="sharp_cocoro_air"
+    ).async_add_entities([sensor])
+    try:
+        assert sensor._restored_at is None
+        assert coordinator._last_outdoor[device.unique_key][0] == 26
+        assert sensor.native_value == 26
+    finally:
+        await sensor.async_remove()
         await coordinator.async_shutdown()

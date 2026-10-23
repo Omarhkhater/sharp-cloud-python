@@ -9,9 +9,7 @@
     },
     "switch": {
       "plasmacluster": {"default": "mdi:air-purifier"},
-      "sleep": {"default": "mdi:sleep"},
       "soft": {"default": "mdi:weather-windy"},
-      "speed": {"default": "mdi:speedometer"},
       "cocoro_air": {"default": "mdi:home-thermometer"}
     },
     "binary_sensor": {
