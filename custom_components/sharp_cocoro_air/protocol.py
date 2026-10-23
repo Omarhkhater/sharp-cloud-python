@@ -432,7 +432,8 @@ def aircon_from_parts(
         half_byte = fa_byte(FA_SETPOINT)
         if half_byte is not None:
             half = half_byte / 2
-            if 10 <= half <= 40:
+            # FA byte 26 can lag behind B3. Keep B3 unless FA agrees within 0.5 °C.
+            if 10 <= half <= 40 and (setpoint is None or abs(half - setpoint) <= 0.5):
                 setpoint = half
 
     humidity: int | None = None

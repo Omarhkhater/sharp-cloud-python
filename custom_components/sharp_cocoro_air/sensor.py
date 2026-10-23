@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from homeassistant.components.sensor import (
     RestoreSensor,
@@ -173,6 +174,7 @@ class SharpOutdoorSensor(SharpSensor, RestoreSensor):
         """Bind the sensor and clear the restore flags."""
         super().__init__(coordinator, key, description)
         self._restored: float | None = None
+        self._restored_at: datetime | None = None
         self._use_restore = False
         self._decided = False
 
@@ -186,15 +188,22 @@ class SharpOutdoorSensor(SharpSensor, RestoreSensor):
             and not isinstance(last.native_value, bool)
         ):
             self._restored = float(last.native_value)
+        state = await self.async_get_last_state()
+        if state is not None:
+            self._restored_at = state.last_updated
         self._accept_restore()
 
     def _handle_coordinator_update(self) -> None:
-        """Apply a late first poll, then drop the restored value once a reading exists."""
+        """Use the restored reading for this update, then let the 6 hour hold run.
+
+        Clearing the fallback after the update means a later poll can expire.
+        Leaving it set kept the restored number on screen after the hold ended.
+        """
         self._accept_restore()
-        device = self._device
-        if device is not None and device.outdoor_temp is not None:
-            self._use_restore = False
         super()._handle_coordinator_update()
+        if self._use_restore:
+            self._use_restore = False
+            self.async_write_ha_state()
 
     def _accept_restore(self) -> None:
         """Seed once: first poll is unknown and the unit is off."""
@@ -206,7 +215,7 @@ class SharpOutdoorSensor(SharpSensor, RestoreSensor):
         self._decided = True
         if device.outdoor_temp is None and device.power is False:
             self._use_restore = True
-            self.coordinator.note_outdoor(self._key, self._restored)
+            self.coordinator.note_outdoor(self._key, self._restored, self._restored_at)
             return
         self._restored = None
 

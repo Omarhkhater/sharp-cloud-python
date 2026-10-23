@@ -19,6 +19,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .client import SharpAuthError, SharpBusy, SharpClient, SharpConnectionError, SharpError
 from .const import (
@@ -119,9 +120,18 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             self._overlay_pending(data)
             return data
 
-    def note_outdoor(self, key: str, value: float) -> None:
-        """Remember a restored outdoor reading so a later off poll can hold it."""
-        self._last_outdoor.setdefault(key, (value, _monotonic()))
+    def note_outdoor(self, key: str, value: float, updated_at: datetime | None = None) -> None:
+        """Remember a restored outdoor reading so a later off poll can hold it.
+
+        ``updated_at`` is the restored state's last update. The hold is measured
+        from that moment, so a reading that was already old does not start over
+        at this restart.
+        """
+        seen = _monotonic()
+        if updated_at is not None:
+            age = (dt_util.utcnow() - dt_util.as_utc(updated_at)).total_seconds()
+            seen -= max(age, 0.0)
+        self._last_outdoor.setdefault(key, (value, seen))
 
     def _hold_outdoor(self, devices: list[Aircon]) -> list[Aircon]:
         """Keep the last outdoor temperature while the unit is off.
@@ -194,7 +204,8 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         except SharpError:
             raise HomeAssistantError("The air conditioner rejected the command") from None
 
-        self._apply_optimistic(key, updates)
+        if result in ("success", "verified"):
+            self._apply_optimistic(key, updates)
         self._schedule_status_refresh()
         if result not in ("success", "verified"):
             raise HomeAssistantError("The air conditioner rejected the command")

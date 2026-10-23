@@ -395,7 +395,10 @@ class SharpClient:
 
         A 400 pairs the box only when this terminal is absent. The log line
         has EPC codes and the result, never a device id or box id.
+        An empty control is rejected here. The cloud answers that with E1004001.
         """
+        if not status:
+            raise ValueError("A control needs at least one property")
         started = time.monotonic()
         body = control_body(device.device_id, device.echonet_node, device.echonet_object, status)
         try:

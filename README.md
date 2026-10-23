@@ -23,6 +23,8 @@ The integration talks to `eg-hms.cloudlabs.sharp.co.jp`. It does not use a passw
 
 Home Assistant 2025.1.0 or newer is required.
 
+The integration logo on **Devices & services** is shown by Home Assistant 2026.3 or newer, which reads the `brand` folder shipped with this integration. Older Home Assistant releases still look the logo up on the brands site. HACS may show a placeholder for the list icon.
+
 ### Without HACS
 
 Copy `custom_components/sharp_cocoro_air` into your Home Assistant `config/custom_components/` folder and restart.

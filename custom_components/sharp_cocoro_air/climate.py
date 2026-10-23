@@ -300,9 +300,10 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
                 fut.set_result(None)
 
     async def _fail_setpoint(self, waiters: list[asyncio.Future[None]], err: Exception) -> None:
-        """Drop the optimistic target, read status, and fail every tap in the burst."""
-        self._pending_target = None
-        self.async_write_ha_state()
+        """Fail the taps that were just sent. A newer tap stays queued."""
+        if not self._waiters:
+            self._pending_target = None
+            self.async_write_ha_state()
         try:
             await self.coordinator.async_request_refresh()
         finally:

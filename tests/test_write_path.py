@@ -32,6 +32,7 @@ from custom_components.sharp_cocoro_air.const import (
     DOMAIN,
     PENDING_GRACE_S,
     RETRY_EPCS,
+    SETPOINT_DEBOUNCE_S,
     WRITE_SETTLE_S,
 )
 from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator, _can_retry
@@ -290,6 +291,76 @@ async def test_stale_poll_keeps_the_pending_target_until_it_matches_or_expires(h
         assert device.unique_key not in coordinator._pending
         assert data[device.unique_key].setpoint == 21.0
     finally:
+        await coordinator.async_shutdown()
+
+
+async def test_rejected_result_is_not_shown_for_thirty_seconds(hass, monkeypatch):
+    """A rejected result does not change the unit. The status read is still scheduled."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.results = ["unmatch", "timeout"]
+    device = _device()
+    coordinator = _coordinator(hass, cloud, device)
+    vanes = cmd_vanes(vertical="swing", horizontal=None, frame_end=80)
+    try:
+        with pytest.raises(HomeAssistantError, match="rejected the command"):
+            await coordinator.async_send(
+                device.unique_key, vanes, vane_vertical="swing", setpoint=26.0
+            )
+        current = coordinator.data[device.unique_key]
+        assert current.setpoint == 21.0
+        assert current.vane_vertical is None
+        assert device.unique_key not in coordinator._pending
+        assert coordinator._refresh_unsub is not None
+
+        with pytest.raises(HomeAssistantError, match="rejected the command"):
+            await coordinator.async_send(device.unique_key, _B3, setpoint=22.0)
+        assert coordinator.data[device.unique_key].setpoint == 21.0
+        assert device.unique_key not in coordinator._pending
+        assert coordinator._refresh_unsub is not None
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_failed_setpoint_keeps_a_newer_tap(hass, monkeypatch):
+    """A send that fails while the user taps again still sends the newer temperature."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.hold = asyncio.Event()
+    cloud.results = [SharpError("rejected"), "success"]
+    cloud.payload = _status_payload(21)
+    device = _device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 22}))
+    second: asyncio.Task | None = None
+    try:
+        await asyncio.sleep(0)
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=SETPOINT_DEBOUNCE_S))
+        await asyncio.sleep(0)
+        assert len(cloud.sent) == 1
+        assert cloud.sent[0][1][0]["valueRange"]["code"] == "22"
+
+        second = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 24}))
+        await asyncio.sleep(0)
+        assert entity._pending_target == 24
+        assert entity._waiters
+        cloud.hold.set()
+        with pytest.raises(HomeAssistantError):
+            await first
+        assert entity._pending_target == 24
+        assert not second.done()
+
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=SETPOINT_DEBOUNCE_S))
+        await second
+        assert len(cloud.sent) == 2
+        assert cloud.sent[1][1][0]["valueRange"]["code"] == "24"
+    finally:
+        if not first.done():
+            first.cancel()
+        if second is not None and not second.done():
+            second.cancel()
+        await entity.async_remove()
         await coordinator.async_shutdown()
 
 

@@ -413,6 +413,24 @@ async def test_unmatch_is_a_result_and_busy_codes_are_distinct(cloud, caplog):
         await client.aclose()
 
 
+async def test_empty_control_is_rejected_before_the_cloud():
+    """An empty control never reaches the cloud. That request returns E1004001."""
+    client = SharpClient(_session(), "https://example.invalid/terminal/1")
+    device = Aircon(
+        box_id="box-1",
+        device_id=1,
+        echonet_node="00-11-22-33-44-55",
+        echonet_object="013001",
+        name="Test",
+        model=None,
+    )
+    try:
+        with pytest.raises(ValueError, match="at least one property"):
+            await client.send_control(device, [])
+    finally:
+        await client.aclose()
+
+
 def test_nonce_is_32_alnum():
     """The login nonce matches the app's 32-character alphabet."""
     nonce = app_nonce()

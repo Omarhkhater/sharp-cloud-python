@@ -209,6 +209,46 @@ def test_fault_code_and_half_degree_frame():
     assert device.setpoint == 26.5
 
 
+def _half_degree_device(*, b3: int | None, fa_setpoint: int | None):
+    """One half-degree unit. ``fa_setpoint`` is the raw byte at index 26."""
+    props: list[tuple[int, bytes]] = []
+    capabilities = bytearray(32)
+    capabilities[8] = 0x10
+    props.append((0xF0, bytes(capabilities)))
+    if b3 is not None:
+        props.append((0xB3, bytes([b3])))
+    if fa_setpoint is not None:
+        frame = bytearray(80)
+        frame[26] = fa_setpoint
+        props.append((0xFA, bytes(frame)))
+    body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
+    for epc, edt in props:
+        body.append(epc)
+        body.append(len(edt))
+        body.extend(edt)
+    device = aircon_from_record(
+        "box-1",
+        {
+            "deviceId": 1,
+            "echonetNode": "00-11-22-33-44-55",
+            "echonetObject": "013001",
+            "echonetProperty": body.hex(),
+            "labelData": {"name": "Half", "deviceType": "AIR_CON"},
+        },
+    )
+    assert device is not None
+    return device
+
+
+def test_b3_setpoint_wins_when_the_fa_byte_lags():
+    """FA byte 26 can lag. B3 stays unless the FA temperature is within 0.5 °C."""
+    assert _half_degree_device(b3=21, fa_setpoint=52).setpoint == 21
+    assert _half_degree_device(b3=21, fa_setpoint=26).setpoint == 21
+    assert _half_degree_device(b3=21, fa_setpoint=43).setpoint == 21.5
+    assert _half_degree_device(b3=21, fa_setpoint=42).setpoint == 21
+    assert _half_degree_device(b3=None, fa_setpoint=0x35).setpoint == 26.5
+
+
 def test_empty_frame_and_half_degree_byte():
     """An empty 80-byte frame is all zeros, and 26.5 C lands on byte 26."""
     assert ControlFrame(80).encode() == "00" * 80
@@ -445,6 +485,10 @@ def test_package_metadata():
     assert "Sharp Air Egypt" in strings
     assert "Enable experimental controls" in strings
     assert "password" not in strings.lower()
+    assert hacs["homeassistant"] == "2025.1.0"
+    readme = (ROOT / "README.md").read_text()
+    assert "2026.3" in readme
+    assert "placeholder" in readme
 
 
 def test_brand_logo_is_the_supplied_png():

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 from homeassistant.components.climate import HVACMode
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import State
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    MockEntityPlatform,
     mock_restore_cache_with_extra_data,
 )
 
@@ -215,4 +218,92 @@ async def test_restart_while_off_restores_the_last_outdoor_value(hass):
         assert coordinator._last_outdoor[device.unique_key][0] == 26
     finally:
         sensor._call_on_remove_callbacks()
+        await coordinator.async_shutdown()
+
+
+def _off_device() -> Aircon:
+    return Aircon(
+        box_id="box-1",
+        device_id=1,
+        echonet_node="00-11-22-33-44-55",
+        echonet_object="013001",
+        name="Living Room",
+        model="AY-XP12YHE",
+        power=False,
+        outdoor_temp=None,
+    )
+
+
+async def _restored_sensor(
+    hass, coordinator: SharpCoordinator, *, age: float
+) -> SharpOutdoorSensor:
+    """An outdoor sensor whose saved state is ``age`` seconds old."""
+    entity_id = "sensor.living_room_outdoor_temperature"
+    mock_restore_cache_with_extra_data(
+        hass,
+        [
+            (
+                State(
+                    entity_id,
+                    "26",
+                    {"unit_of_measurement": UnitOfTemperature.CELSIUS},
+                    last_updated=dt_util.utcnow() - timedelta(seconds=age),
+                ),
+                {"native_value": 26, "native_unit_of_measurement": UnitOfTemperature.CELSIUS},
+            )
+        ],
+    )
+    sensor = _outdoor(coordinator)
+    sensor.entity_id = entity_id
+    await MockEntityPlatform(
+        hass, domain="sensor", platform_name="sharp_cocoro_air"
+    ).async_add_entities([sensor])
+    return sensor
+
+
+async def test_restored_outdoor_expires_after_the_hold(hass, monkeypatch):
+    """The saved reading is not kept once the 6 hour hold has passed."""
+    clock = _Clock()
+    monkeypatch.setattr(coordinator_mod, "_monotonic", clock.monotonic)
+    device = _off_device()
+    cloud = _Cloud(_payload(power=0x31, outdoor=0x7E))
+    coordinator = _coordinator(hass, cloud)
+    coordinator.data = {device.unique_key: device}
+    sensor = await _restored_sensor(hass, coordinator, age=0)
+    try:
+        assert sensor.native_value == 26
+        assert sensor._use_restore is True
+
+        clock.now += OUTDOOR_HOLD_S
+        data = await coordinator._async_update_data()
+        assert data[device.unique_key].outdoor_temp is None
+        coordinator.async_set_updated_data(data)
+        assert sensor._use_restore is False
+        assert sensor.native_value is None
+        assert "stale" not in sensor.extra_state_attributes
+    finally:
+        await sensor.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_restored_outdoor_age_comes_from_last_updated(hass, monkeypatch):
+    """A reading that was already 6 hours old before restart is not held again."""
+    clock = _Clock()
+    monkeypatch.setattr(coordinator_mod, "_monotonic", clock.monotonic)
+    device = _off_device()
+    cloud = _Cloud(_payload(power=0x31, outdoor=0x7E))
+    coordinator = _coordinator(hass, cloud)
+    coordinator.data = {device.unique_key: device}
+    sensor = await _restored_sensor(hass, coordinator, age=OUTDOOR_HOLD_S + 60)
+    try:
+        seen = coordinator._last_outdoor[device.unique_key][1]
+        assert clock.now - seen > OUTDOOR_HOLD_S
+
+        data = await coordinator._async_update_data()
+        assert data[device.unique_key].outdoor_temp is None
+        coordinator.async_set_updated_data(data)
+        assert sensor.native_value is None
+        assert "stale" not in sensor.extra_state_attributes
+    finally:
+        await sensor.async_remove()
         await coordinator.async_shutdown()
