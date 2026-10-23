@@ -21,7 +21,7 @@ from custom_components.sharp_cocoro_air.client import (
     SharpBusy,
     SharpClient,
     SharpConnectionError,
-    SharpError,
+    SharpRefused,
     SharpTerminalRefused,
     app_nonce,
 )
@@ -420,9 +420,18 @@ async def test_unmatch_is_a_result_and_busy_codes_are_distinct(cloud, caplog):
         assert busy.value.code == "E1001001"
 
         fake.control_error = "E1001999"
-        with pytest.raises(SharpError) as rejected:
+        with pytest.raises(SharpRefused) as rejected:
             await client.send_control(device, cmd_setpoint(22, half_degree=False, frame_end=80))
+        assert rejected.value.code == "E1001999"
         assert not isinstance(rejected.value, SharpBusy)
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and record.name == "custom_components.sharp_cocoro_air.client"
+        ]
+        assert "deviceControl refused, errorCode=E1001999" in warnings
+        assert all("box-1" not in message and "cmd-1" not in message for message in warnings)
     finally:
         await client.aclose()
 

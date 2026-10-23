@@ -22,7 +22,7 @@ Each indoor unit shows up as its own device with:
 - **Plasmacluster** on/off switch
 - **Status:** Super Jet and fault indicators
 
-Airflow controls (vertical and horizontal vane positions and swing) and half-degree temperature steps are on by default. Soft and Cocoro Air stay behind **Configure → Show untested controls**.
+Airflow controls and half-degree temperature steps are on by default. Vertical positions are Auto, Up, Level, Slightly down, Further down, Fully down, and Swing. Horizontal positions follow the unit; these models offer Straight, Left, Right, and Swing. Soft and Cocoro Air stay behind **Configure → Show untested controls**.
 
 ## Install (HACS)
 

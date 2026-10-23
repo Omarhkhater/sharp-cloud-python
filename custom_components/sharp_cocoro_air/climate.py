@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from datetime import datetime
 from typing import ClassVar
 
@@ -33,6 +34,7 @@ from .const import (
     MODE_DRY,
     MODE_FAN,
     MODE_HEAT,
+    PENDING_GRACE_S,
     SETPOINT_DEBOUNCE_S,
     TEMP_MAX,
     TEMP_MIN,
@@ -61,6 +63,11 @@ _HVAC = {
 _MODE = {hvac: mode for mode, hvac in _HVAC.items()}
 
 
+def _monotonic() -> float:
+    """Clock for how long a vane pick stays on the card before it expires."""
+    return time.monotonic()
+
+
 def _known_vane(name: str | None) -> str | None:
     """A vane name the frame builder can encode. Unknown readings are left out."""
     if name is None:
@@ -79,6 +86,33 @@ def _is_half_step(temperature: float) -> bool:
     """True for 21.5, false for 21 or 22."""
     doubled = round(temperature * 2)
     return abs(temperature * 2 - doubled) < 1e-6 and doubled % 2 == 1
+
+
+def _vane_frame(device: Aircon, wanted: dict[str, str]) -> list[dict]:
+    """FA frame for the latest vane pick, copied from this device's status.
+
+    ``wanted`` names the positions the user picked. The other vane comes from
+    the device passed in, which the coordinator reads under the write lock.
+    """
+    vertical = wanted.get("vane_vertical")
+    if vertical is None:
+        vertical = _known_vane(device.vane_vertical)
+    horizontal = wanted.get("vane_horizontal")
+    if horizontal is None:
+        horizontal = _known_vane(device.vane_horizontal)
+    status = cmd_vanes(
+        vertical=vertical,
+        horizontal=horizontal,
+        frame_end=device.frame_end,
+        current=device.fa_frame,
+    )
+    code = str(status[0]["valueBinary"]["code"])
+    if fa_payload_is_blank(code):
+        raise HomeAssistantError(
+            "Sharp would reject that command because its payload is empty. "
+            "Wait for a status reading and try again."
+        )
+    return status
 
 
 async def async_setup_entry(
@@ -137,6 +171,9 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             name=device.name,
         )
         self._pending_target: float | None = None
+        self._pending_vanes: dict[str, str] = {}
+        self._pending_vanes_until = 0.0
+        self._vane_send_running = False
         self._debounce_unsub = None
         self._waiters: list[asyncio.Future[None]] = []
 
@@ -187,13 +224,22 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         """The same step the capability byte allows."""
         return self.precision
 
+    def _vertical_modes(self, device: Aircon) -> list[str] | None:
+        """Vertical positions. Pattern 02 hides Fully down in heat and auto."""
+        if not device.caps.vertical_vanes:
+            return None
+        modes = list(device.caps.vertical_vanes)
+        if device.caps.vertical_pattern == 2 and device.mode in {MODE_HEAT, MODE_AUTO}:
+            return [mode for mode in modes if mode != "down"]
+        return modes
+
     @property
     def swing_modes(self) -> list[str] | None:
         """Vertical vane positions from the capability bytes."""
         device = self._device
-        if device is None or not device.caps.vertical_vanes:
+        if device is None:
             return None
-        return list(device.caps.vertical_vanes)
+        return self._vertical_modes(device)
 
     @property
     def swing_horizontal_modes(self) -> list[str] | None:
@@ -250,17 +296,27 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         device = self._device
         return None if device is None else device.fan
 
+    def _shown_vane(self, key: str, actual: str | None) -> str | None:
+        """The pick, while it is still within the grace period."""
+        if _monotonic() < self._pending_vanes_until:
+            pending = self._pending_vanes.get(key)
+            if pending is not None:
+                return pending
+        return actual
+
     @property
     def swing_mode(self) -> str | None:
-        """Vertical vane position."""
+        """Vertical vane position. A recent pick shows before the cloud answers."""
         device = self._device
-        return None if device is None else device.vane_vertical
+        actual = None if device is None else device.vane_vertical
+        return self._shown_vane("vane_vertical", actual)
 
     @property
     def swing_horizontal_mode(self) -> str | None:
-        """Horizontal vane position."""
+        """Horizontal vane position. A recent pick shows before the cloud answers."""
         device = self._device
-        return None if device is None else device.vane_horizontal
+        actual = None if device is None else device.vane_horizontal
+        return self._shown_vane("vane_horizontal", actual)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Turn the unit off, or on into the selected mode."""
@@ -376,38 +432,44 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
     async def _async_set_vanes(
         self, *, vertical: str | None = None, horizontal: str | None = None
     ) -> None:
-        """Send the vane that changed and the other vane's current position."""
+        """Show the pick at once. A later pick replaces one that is still sending."""
         device = self._device
         if device is None:
             return
-        if vertical is not None and vertical not in device.caps.vertical_vanes:
+        offered = self._vertical_modes(device)
+        if vertical is not None and (offered is None or vertical not in offered):
             raise ServiceValidationError("This air conditioner does not support that vane position")
         if horizontal is not None and horizontal not in device.caps.horizontal_vanes:
             raise ServiceValidationError("This air conditioner does not support that vane position")
-        sent_vertical = vertical if vertical is not None else _known_vane(device.vane_vertical)
-        sent_horizontal = (
-            horizontal if horizontal is not None else _known_vane(device.vane_horizontal)
-        )
-        if sent_vertical is None and sent_horizontal is None:
+        if vertical is not None:
+            self._pending_vanes["vane_vertical"] = vertical
+        if horizontal is not None:
+            self._pending_vanes["vane_horizontal"] = horizontal
+        self._pending_vanes_until = _monotonic() + PENDING_GRACE_S
+        self.async_write_ha_state()
+        if self._vane_send_running:
             return
-        status = cmd_vanes(
-            vertical=sent_vertical,
-            horizontal=sent_horizontal,
-            frame_end=device.frame_end,
-            current=device.fa_frame,
-        )
-        code = str(status[0]["valueBinary"]["code"])
-        if fa_payload_is_blank(code):
-            raise HomeAssistantError(
-                "Sharp would reject that command because its payload is empty. "
-                "Wait for a status reading and try again."
-            )
-        updates: dict[str, str] = {}
-        if sent_vertical is not None:
-            updates["vane_vertical"] = sent_vertical
-        if sent_horizontal is not None:
-            updates["vane_horizontal"] = sent_horizontal
-        await self.coordinator.async_send(self._key, status, **updates)
+        self._vane_send_running = True
+        try:
+            while True:
+                wanted = dict(self._pending_vanes)
+                await self.coordinator.async_send_built(
+                    self._key,
+                    lambda fresh, picked=wanted: _vane_frame(fresh, picked),
+                    **wanted,
+                )
+                if self._pending_vanes == wanted:
+                    break
+        except HomeAssistantError:
+            self._pending_vanes.clear()
+            self._pending_vanes_until = 0.0
+            self.async_write_ha_state()
+            raise
+        finally:
+            self._vane_send_running = False
+        self._pending_vanes.clear()
+        self._pending_vanes_until = 0.0
+        self.async_write_ha_state()
 
     async def async_turn_on(self) -> None:
         """Power on without changing the mode."""

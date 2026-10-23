@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.sharp_cocoro_air.const import APP_SECRET, B2C_CLIENT_ID
+from custom_components.sharp_cocoro_air.const import (
+    APP_SECRET,
+    B2C_CLIENT_ID,
+    VANE_HORIZONTAL,
+    VANE_VERTICAL,
+)
 from custom_components.sharp_cocoro_air.protocol import (
     Capabilities,
     ControlFrame,
@@ -62,8 +67,16 @@ def test_fixture_matches_the_live_decode(boxinfo):
     assert living.energy_kwh == pytest.approx(2367.458)
     assert living.fault is False
     assert living.caps.half_degree is True
-    assert living.caps.vertical_vanes == ("auto", "up", "horizontal", "down", "swing")
-    assert "down1" not in living.caps.vertical_vanes
+    assert living.caps.vertical_pattern == 1
+    assert living.caps.vertical_vanes == (
+        "auto",
+        "up",
+        "level",
+        "down1",
+        "down2",
+        "down",
+        "swing",
+    )
     assert living.caps.horizontal_vanes == ("straight", "left", "right", "swing")
     assert "wide" not in living.caps.horizontal_vanes
     assert "auto" not in living.caps.horizontal_vanes
@@ -309,35 +322,56 @@ def test_half_degree_setpoint_uses_the_fa_frame_only():
         cmd_setpoint(26.5, half_degree=False, frame_end=80)
 
 
-def test_vane_lists_follow_the_capability_patterns():
-    """Byte 10 is the vertical pattern and byte 11 is the horizontal pattern.
+def test_vane_lists_follow_the_app_patterns():
+    """Byte 10 is wind_port and byte 11 is wind_land, from a.java:310-329.
 
-    Byte 12 is the fan pattern. It is not a horizontal position, even when it
-    is 0x03 (right, if it were read as a position code).
+    00 hides a block. Any other vertical pattern shows all seven. Horizontal
+    pattern 02 leaves four; 01 and 03 show all seven. Byte 12 is the fan
+    pattern, not a vane position.
     """
     listed = bytearray(32)
     listed[10] = 0x01
     listed[11] = 0x02
     listed[12] = 0x03
     caps = parse_capabilities(bytes(listed))
+    assert caps.vertical_pattern == 1
+    assert caps.vertical_vanes == (
+        "auto",
+        "up",
+        "level",
+        "down1",
+        "down2",
+        "down",
+        "swing",
+    )
     assert caps.horizontal_vanes == ("straight", "left", "right", "swing")
-    assert caps.vertical_vanes == ("auto", "up", "horizontal", "down", "swing")
     assert caps.rapid is False
 
-    narrow = bytearray(32)
-    narrow[11] = 0x01
-    assert parse_capabilities(bytes(narrow)).horizontal_vanes == ("straight", "swing")
-    assert parse_capabilities(bytes(narrow)).vertical_vanes == ()
+    hidden_vertical = bytearray(32)
+    hidden_vertical[10] = 0x00
+    hidden_vertical[11] = 0x01
+    none = parse_capabilities(bytes(hidden_vertical))
+    assert none.vertical_vanes == ()
+    assert none.vertical_pattern == 0
+    assert none.horizontal_vanes == (
+        "auto",
+        "straight",
+        "left",
+        "right",
+        "wide",
+        "enclose",
+        "swing",
+    )
 
-    wider = bytearray(32)
-    wider[10] = 0x02
-    wider[11] = 0x03
-    wider[12] = 0x01
-    wider_caps = parse_capabilities(bytes(wider))
-    assert wider_caps.vertical_vanes[0] == "auto"
-    assert "down1" in wider_caps.vertical_vanes
-    assert "wide" in wider_caps.horizontal_vanes
-    assert "auto" in wider_caps.horizontal_vanes
+    pattern_two = bytearray(32)
+    pattern_two[10] = 0x02
+    pattern_two[11] = 0x03
+    pattern_two[12] = 0x01
+    wider_caps = parse_capabilities(bytes(pattern_two))
+    assert wider_caps.vertical_pattern == 2
+    assert wider_caps.vertical_vanes == caps.vertical_vanes
+    assert "down" in wider_caps.vertical_vanes
+    assert wider_caps.horizontal_vanes == none.horizontal_vanes
     assert wider_caps.rapid is True
 
     hidden = bytearray(32)
@@ -346,7 +380,62 @@ def test_vane_lists_follow_the_capability_patterns():
     assert parse_capabilities(bytes(hidden)).rapid is False
     assert parse_capabilities(bytes(16)).horizontal_vanes == ()
     assert parse_capabilities(bytes(16)).vertical_vanes == ()
+    assert parse_capabilities(bytes(16)).vertical_pattern == 0
     assert Capabilities().horizontal_vanes == ()
+
+
+def test_vane_labels_round_trip_all_fourteen_positions():
+    """Each app label encodes to its byte and decodes back to the same label."""
+    assert [name for name, _code in VANE_VERTICAL] == [
+        "auto",
+        "up",
+        "level",
+        "down1",
+        "down2",
+        "down",
+        "swing",
+    ]
+    assert len(VANE_VERTICAL) + len(VANE_HORIZONTAL) == 14
+    current = bytes(80)
+    for name, code in VANE_VERTICAL:
+        raw = bytes.fromhex(
+            cmd_vanes(vertical=name, horizontal=None, frame_end=80, current=current)[0][
+                "valueBinary"
+            ]["code"]
+        )
+        assert raw[48] == int(code, 16)
+        assert _device_with_vanes(raw[48], 0x01).vane_vertical == name
+    for name, code in VANE_HORIZONTAL:
+        raw = bytes.fromhex(
+            cmd_vanes(vertical=None, horizontal=name, frame_end=80, current=current)[0][
+                "valueBinary"
+            ]["code"]
+        )
+        assert raw[49] == int(code, 16)
+        assert _device_with_vanes(0x01, raw[49]).vane_horizontal == name
+
+
+def _device_with_vanes(vertical: int, horizontal: int):
+    """One indoor unit whose FA vane bytes are the two given values."""
+    fa = bytearray(80)
+    fa[48] = vertical
+    fa[49] = horizontal
+    body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, 0x01, 0xFA, len(fa)])
+    body.extend(fa)
+    payload = {
+        "devices": [
+            {
+                "boxId": "box-1",
+                "deviceId": 1,
+                "echonetNode": "00-11-22-33-44-55",
+                "echonetObject": "013001",
+                "model": "AY-XP12YHE",
+                "labelData": {"deviceType": "AIR_CON", "name": "Living Room"},
+                "echonetProperty": body.hex(),
+            }
+        ]
+    }
+    return split_box_info(payload)[1][0]
 
 
 def test_cocoro_needs_both_capability_bits():
@@ -568,7 +657,7 @@ def test_package_metadata():
     ).read_text()
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["config_flow"] is True
-    assert manifest["version"] == "0.3.0"
+    assert manifest["version"] == "0.3.1"
     assert manifest["name"] == "Sharp Air Egypt"
     assert manifest["domain"] == "sharp_cocoro_air"
     assert manifest["documentation"] == "https://github.com/Omarhkhater/sharp-cloud-python"
@@ -587,13 +676,22 @@ def test_package_metadata():
     assert "https://github.com/Omarhkhater/sharp-cloud-python" in readme
     assert "sharp-air-egypt-ha" not in readme
     assert "sharp-air-egypt-ha" not in changelog
-    assert 'version = "0.3.0"' in (ROOT / "pyproject.toml").read_text()
+    assert 'version = "0.3.1"' in (ROOT / "pyproject.toml").read_text()
     assert (
-        "Airflow controls (vertical and horizontal vane positions and swing) "
-        "and half-degree temperature steps are on by default."
-    ) in readme
+        "Vertical positions are Auto, Up, Level, Slightly down, Further down, Fully down, and Swing."
+        in readme
+    )
+    assert "half-degree temperature steps are on by default." in readme
     assert "Enable experimental controls" not in readme
     assert "## [0.3.0] - 2026-10-24" in changelog
+    assert "## [0.3.1] - 2026-10-24" in changelog
+    assert "state value changed from `horizontal` to `level`" in changelog
+    icons = json.loads((ROOT / "custom_components" / "sharp_cocoro_air" / "icons.json").read_text())
+    vane_icons = icons["entity"]["climate"]["aircon"]["state_attributes"]["swing_mode"]["state"]
+    assert vane_icons["level"] == "mdi:arrow-right-thin"
+    assert vane_icons["swing"] == "mdi:arrow-up-down"
+    assert "mdi:arrow-left-right" not in vane_icons.values()
+    assert "horizontal" not in vane_icons
     assert "placeholder" not in readme.lower()
 
 

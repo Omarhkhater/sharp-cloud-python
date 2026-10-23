@@ -57,10 +57,10 @@
             "state": {
               "auto": "Auto",
               "up": "Up",
-              "horizontal": "Horizontal",
-              "down1": "Down 1",
-              "down2": "Down 2",
-              "down": "Down",
+              "level": "Level",
+              "down1": "Slightly down",
+              "down2": "Further down",
+              "down": "Fully down",
               "swing": "Swing"
             }
           },

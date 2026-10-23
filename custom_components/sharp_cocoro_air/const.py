@@ -86,12 +86,13 @@ FAN_MODES: tuple[tuple[str, str], ...] = (
     (FAN_RAPID, "38"),
 )
 
-# FA frame, 1-based index 49 (0-based byte 48). Section 4.2's table says 48,
-# and section 4.4 says 49. The captured frames put vertical auto/up here.
+# FA frame, 1-based index 49 (0-based byte 48). The app's portrait_horizontal
+# position is a level vane, not side-to-side swing. The state key is "level"
+# so Home Assistant does not draw the left-right icon it uses for "horizontal".
 VANE_VERTICAL: tuple[tuple[str, str], ...] = (
     ("auto", "00"),
     ("up", "01"),
-    ("horizontal", "02"),
+    ("level", "02"),
     ("down1", "03"),
     ("down2", "04"),
     ("down", "05"),

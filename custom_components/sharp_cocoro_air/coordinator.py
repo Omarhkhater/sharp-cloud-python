@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -23,11 +24,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .client import (
+    SharpAPIError,
     SharpAuthError,
     SharpBusy,
     SharpClient,
     SharpConnectionError,
     SharpError,
+    SharpRefused,
     SharpTerminalRefused,
 )
 from .const import (
@@ -234,30 +237,64 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         confirmed with one status read and is not sent again. The 15-second
         refresh is never awaited while a lock is held.
         """
+        await self._async_send(key, lambda _device: status, updates, skip_if_applied=False)
+
+    async def async_send_built(
+        self,
+        key: str,
+        build: Callable[[Aircon], list[dict]],
+        **updates: Any,
+    ) -> None:
+        """Build the frame under the box lock from the current device.
+
+        A command whose fields already match that device is not sent. Queued
+        vane picks therefore copy the status from after the previous write,
+        and picking the position the unit is already in does nothing.
+        """
+        await self._async_send(key, build, updates, skip_if_applied=True)
+
+    async def _async_send(
+        self,
+        key: str,
+        build: Callable[[Aircon], list[dict]],
+        updates: dict[str, Any],
+        *,
+        skip_if_applied: bool,
+    ) -> None:
+        """Send under the box lock. ``build`` runs only after the lock is held."""
         if not self.data or key not in self.data:
             raise HomeAssistantError("That air conditioner is not available")
-        device = self.data[key]
-        box_id = device.box_id
+        box_id = self.data[key].box_id
         confirm_failed = False
+        skipped = False
+        status: list[dict] = []
+        result = "verified"
         try:
             async with self._box_locks[box_id]:
-                try:
-                    await self._wait_settle(box_id)
+                if not self.data or key not in self.data:
+                    raise HomeAssistantError("That air conditioner is not available")
+                device = self.data[key]
+                if skip_if_applied and updates and _matches(device, updates):
+                    skipped = True
+                else:
+                    status = build(device)
                     try:
-                        result = await self.client.send_control(device, status)
-                    except SharpBusy:
-                        await _pause(_BUSY_RETRY_S)
-                        result = await self.client.send_control(device, status)
-                    if result == "unmatch" and _is_fa(status):
+                        await self._wait_settle(box_id)
                         try:
-                            result = await self._confirm_fa(device, updates)
-                        except SharpError:
-                            confirm_failed = True
-                            raise
-                    elif result == "unmatch" and _can_retry(status):
-                        result = await self._verify_or_resend(device, status, updates)
-                finally:
-                    self._last_result_at[box_id] = _monotonic()
+                            result = await self.client.send_control(device, status)
+                        except SharpBusy:
+                            await _pause(_BUSY_RETRY_S)
+                            result = await self.client.send_control(device, status)
+                        if result == "unmatch" and _is_fa(status):
+                            try:
+                                result = await self._confirm_fa(device, updates)
+                            except SharpError:
+                                confirm_failed = True
+                                raise
+                        elif result == "unmatch" and _can_retry(status):
+                            result = await self._verify_or_resend(device, status, updates)
+                    finally:
+                        self._last_result_at[box_id] = _monotonic()
         except SharpTerminalRefused:
             self._set_auth_failures(0)
             self.entry.async_start_reauth(self.hass)
@@ -266,17 +303,32 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             ) from None
         except SharpAuthError:
             raise HomeAssistantError("Sharp sign-in expired") from None
+        except SharpBusy:
+            self._schedule_status_refresh()
+            raise HomeAssistantError(
+                "The air conditioner is busy. Try again in a few seconds."
+            ) from None
+        except SharpRefused as err:
+            self._schedule_status_refresh()
+            raise HomeAssistantError(f"Sharp refused the command (code {err.code})") from None
+        except SharpAPIError as err:
+            self._schedule_status_refresh()
+            raise HomeAssistantError(
+                f"The Sharp cloud rejected the request (HTTP {err.status})"
+            ) from None
         except SharpConnectionError:
+            self._schedule_status_refresh()
             if confirm_failed:
-                self._schedule_status_refresh()
                 raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError("Could not reach the Sharp cloud") from None
         except SharpError:
+            self._schedule_status_refresh()
             if confirm_failed:
-                self._schedule_status_refresh()
                 raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError("The air conditioner rejected the command") from None
 
+        if skipped:
+            return
         if result in ("success", "verified"):
             self._apply_optimistic(key, updates)
         self._schedule_status_refresh()
