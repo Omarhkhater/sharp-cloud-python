@@ -14,12 +14,12 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.sharp_cocoro_air.client import SharpCommandRejected
 from custom_components.sharp_cocoro_air.const import DOMAIN
 from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
 from custom_components.sharp_cocoro_air.protocol import Aircon
 
 _STATUS = [{"statusCode": "a0", "valueType": "valueSingle", "valueSingle": {"code": "41"}}]
+_FA = [{"statusCode": "fa", "valueType": "valueBinary", "valueBinary": {"code": "00"}}]
 
 
 class _Cloud:
@@ -30,10 +30,9 @@ class _Cloud:
         self.sent: list[list[dict]] = []
         self.box_reads = 0
 
-    async def send_control(self, device: Aircon, status: list[dict]) -> None:
+    async def send_control(self, device: Aircon, status: list[dict]) -> str:
         self.sent.append(status)
-        if self.result != "success":
-            raise SharpCommandRejected(self.result)
+        return self.result
 
     async def box_info(self) -> dict:
         self.box_reads += 1
@@ -65,7 +64,8 @@ def _coordinator(hass, cloud: _Cloud) -> tuple[SharpCoordinator, Aircon]:
 
 def _spy(coordinator: SharpCoordinator, recorded: list[tuple[float, bool]]):
     def spy(hass, delay, action):
-        recorded.append((delay, coordinator._lock.locked()))
+        box_locked = any(lock.locked() for lock in coordinator._box_locks.values())
+        recorded.append((delay, coordinator._poll_lock.locked() or box_locked))
         return real_call_later(hass, delay, action)
 
     return spy
@@ -99,7 +99,7 @@ async def test_success_schedules_one_status_refresh(hass):
 
 
 async def test_unmatch_schedules_one_status_refresh(hass):
-    """unmatch is shown as a rejection and still reads status 15 seconds later."""
+    """An FA unmatch is still a rejection, and status is read 15 seconds later."""
     cloud = _Cloud("unmatch")
     coordinator, device = _coordinator(hass, cloud)
     recorded: list[tuple[float, bool]] = []
@@ -111,9 +111,8 @@ async def test_unmatch_schedules_one_status_refresh(hass):
             ),
             pytest.raises(HomeAssistantError, match="rejected the command"),
         ):
-            await coordinator.async_send(device.unique_key, _STATUS, setpoint=22.0)
+            await coordinator.async_send(device.unique_key, _FA, vane_vertical="swing")
 
-        assert coordinator.data[device.unique_key].setpoint == 21.0
         assert recorded == [(15, False)]
         assert len(cloud.sent) == 1
         await _advance(hass, 20)
@@ -125,7 +124,7 @@ async def test_unmatch_schedules_one_status_refresh(hass):
 
 async def test_status_refresh_does_not_resend_the_command(hass):
     """The follow-up read calls boxInfo. It does not call deviceControl again."""
-    cloud = _Cloud("unmatch")
+    cloud = _Cloud("timeout")
     coordinator, device = _coordinator(hass, cloud)
     try:
         with pytest.raises(HomeAssistantError):

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+from datetime import datetime
 from typing import ClassVar
 
 from homeassistant.components.climate import (
@@ -14,8 +16,10 @@ from homeassistant.components.climate import (
 )
 from homeassistant.const import PRECISION_HALVES, PRECISION_WHOLE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SharpConfigEntry
@@ -29,6 +33,7 @@ from .const import (
     MODE_DRY,
     MODE_FAN,
     MODE_HEAT,
+    SETPOINT_DEBOUNCE_S,
     TEMP_MAX,
     TEMP_MIN,
     VANE_HORIZONTAL,
@@ -115,6 +120,14 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             model=device.model,
             name=device.name,
         )
+        self._pending_target: float | None = None
+        self._debounce_unsub = None
+        self._waiters: list[asyncio.Future[None]] = []
+
+    async def async_added_to_hass(self) -> None:
+        """Cancel a pending temperature tap if the entity is removed."""
+        await super().async_added_to_hass()
+        self.async_on_remove(self._cancel_setpoint)
 
     @property
     def available(self) -> bool:
@@ -196,7 +209,9 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
 
     @property
     def target_temperature(self) -> float | None:
-        """Setpoint. Half degrees come from the FA frame when the unit has them."""
+        """Setpoint. A burst of taps shows the latest value before it is sent."""
+        if self._pending_target is not None:
+            return self._pending_target
         device = self._device
         return None if device is None else device.setpoint
 
@@ -249,12 +264,62 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         half_degree = self.coordinator.experimental and device.caps.half_degree
         if not half_degree:
             target = snap_whole_degree(target)
-        status = cmd_setpoint(
-            target,
-            half_degree=half_degree,
-            frame_end=device.frame_end,
-        )
-        await self.coordinator.async_send(self._key, status, setpoint=target)
+        self._pending_target = target
+        self.async_write_ha_state()
+        if self._debounce_unsub is not None:
+            self._debounce_unsub()
+            self._debounce_unsub = None
+        self._debounce_unsub = async_call_later(self.hass, SETPOINT_DEBOUNCE_S, self._flush)
+        future: asyncio.Future[None] = self.hass.loop.create_future()
+        self._waiters.append(future)
+        await future
+
+    async def _flush(self, _now: datetime) -> None:
+        """Send the last temperature in the burst. Every waiter gets that result."""
+        self._debounce_unsub = None
+        target = self._pending_target
+        waiters = self._waiters
+        self._waiters = []
+        device = self._device
+        if device is None or target is None:
+            await self._fail_setpoint(
+                waiters, HomeAssistantError("That air conditioner is not available")
+            )
+            return
+        half_degree = self.coordinator.experimental and device.caps.half_degree
+        try:
+            status = cmd_setpoint(target, half_degree=half_degree, frame_end=device.frame_end)
+            await self.coordinator.async_send(self._key, status, setpoint=target)
+        except (HomeAssistantError, ValueError) as err:
+            await self._fail_setpoint(waiters, err)
+            return
+        if not self._waiters:
+            self._pending_target = None
+        for fut in waiters:
+            if not fut.done():
+                fut.set_result(None)
+
+    async def _fail_setpoint(self, waiters: list[asyncio.Future[None]], err: Exception) -> None:
+        """Drop the optimistic target, read status, and fail every tap in the burst."""
+        self._pending_target = None
+        self.async_write_ha_state()
+        try:
+            await self.coordinator.async_request_refresh()
+        finally:
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_exception(HomeAssistantError(str(err)))
+
+    def _cancel_setpoint(self) -> None:
+        """Unload: cancel the debounce timer and fail taps that have not been sent."""
+        if self._debounce_unsub is not None:
+            self._debounce_unsub()
+            self._debounce_unsub = None
+        waiters = self._waiters
+        self._waiters = []
+        for fut in waiters:
+            if not fut.done():
+                fut.set_exception(HomeAssistantError("The air conditioner is not available"))
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set the fan speed. Rapid is experimental and was rejected live."""

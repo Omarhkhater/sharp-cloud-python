@@ -12,8 +12,10 @@ from aiohttp import web
 from custom_components.sharp_cocoro_air.client import (
     SharpAPIError,
     SharpAuthError,
+    SharpBusy,
     SharpClient,
     SharpConnectionError,
+    SharpError,
     app_nonce,
 )
 from custom_components.sharp_cocoro_air.const import APP_NAME, APP_SECRET
@@ -33,6 +35,8 @@ class FakeCloud:
         self.fail_control_once = False
         self.fail_login_code = False
         self.unauthorized_once = False
+        self.control_error: str | None = None
+        self.result_script: list[str] | None = None
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         """Dispatch one HMS request."""
@@ -73,10 +77,16 @@ class FakeCloud:
             self.control_attempts += 1
             if self.fail_control_once and self.control_attempts == 1:
                 return web.Response(status=400, text="")
+            if self.control_error:
+                return web.json_response({"controlList": [{"errorCode": self.control_error}]})
             return web.json_response({"controlList": [{"id": "cmd-1", "errorCode": None}]})
         if path.endswith("/control/controlResult"):
             self.result_attempts += 1
-            state = "wait" if self.result_attempts == 1 else "success"
+            if self.result_script:
+                index = min(self.result_attempts - 1, len(self.result_script) - 1)
+                state = self.result_script[index]
+            else:
+                state = "wait" if self.result_attempts == 1 else "success"
             return web.json_response(
                 {"resultList": [{"id": "cmd-1", "status": state, "epc": "b3"}]}
             )
@@ -360,6 +370,47 @@ async def test_control_400_does_not_pair_when_the_terminal_is_listed(cloud):
     paths = [call["path"].rstrip("/").rsplit("/", 1)[-1] for call in fake.calls]
     assert paths == ["deviceControl", "boxInfo"]
     assert not any(path == "pairing" for path in paths)
+
+
+async def test_unmatch_is_a_result_and_busy_codes_are_distinct(cloud, caplog):
+    """unmatch is returned. E1001001 is busy. Any other errorCode is a hard error."""
+    fake, base = cloud
+    fake.result_script = ["unmatch"]
+    client = await _client(base, "https://example.invalid/terminal/1")
+    device = Aircon(
+        box_id="box-1",
+        device_id=7,
+        echonet_node="00-11-22-33-44-55",
+        echonet_object="013001",
+        name="Test",
+        model=None,
+    )
+    caplog.set_level("DEBUG", logger="custom_components.sharp_cocoro_air.client")
+    try:
+        result = await client.send_control(
+            device, cmd_setpoint(22, half_degree=False, frame_end=80)
+        )
+        logged = " ".join(
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "custom_components.sharp_cocoro_air.client"
+        )
+        assert result == "unmatch"
+        assert "result=unmatch" in logged
+        assert "box-1" not in logged
+        assert "cmd-1" not in logged
+
+        fake.control_error = "E1001001"
+        with pytest.raises(SharpBusy) as busy:
+            await client.send_control(device, cmd_setpoint(22, half_degree=False, frame_end=80))
+        assert busy.value.code == "E1001001"
+
+        fake.control_error = "E1001999"
+        with pytest.raises(SharpError) as rejected:
+            await client.send_control(device, cmd_setpoint(22, half_degree=False, frame_end=80))
+        assert not isinstance(rejected.value, SharpBusy)
+    finally:
+        await client.aclose()
 
 
 def test_nonce_is_32_alnum():

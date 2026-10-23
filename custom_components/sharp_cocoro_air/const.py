@@ -30,6 +30,16 @@ SCAN_INTERVAL = timedelta(seconds=60)
 # A box that rejects pairing is not tried again on the 60-second poll.
 PAIR_BACKOFF_SECONDS = 60 * 60
 
+# Rapid temperature taps collapse into one write. The unit keeps applying a
+# command for several seconds after controlResult, so the next write to the
+# same box waits, and an unmatch is checked against a later status read.
+SETPOINT_DEBOUNCE_S = 1.5
+WRITE_SETTLE_S = 2.0
+VERIFY_DELAY_S = 12.0
+PENDING_GRACE_S = 30.0
+# Single-value EPCs that may be sent once more after unmatch. FA frames are not.
+RETRY_EPCS = {"80", "b0", "a0", "b3", "cf"}
+
 # F0 byte 13 selects a per-model range table that was not in the capture.
 # The slider is the usual Sharp remote span. The cloud rejects anything outside it.
 TEMP_MIN = 16.0

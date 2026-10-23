@@ -71,13 +71,13 @@ The temperature slider runs from 16 °C to 30 °C. F0 names a per-model range ta
 
 Fan speeds are Auto, Quiet, Very weak, Weak, and Strong.
 
-The integration polls about every 60 seconds. After a command is accepted, the entity updates immediately instead of waiting for the next poll.
+The integration polls about every 60 seconds. A command updates the entity immediately, and status is read again about 15 seconds later. Rapid temperature taps are sent as one write.
 
 ### Experimental controls
 
 Half-degree setpoints, vertical and horizontal vanes, the Rapid fan speed, and the Sleep switch are off by default. Rapid was rejected on a live unit. The other writes in this group were not confirmed live.
 
-Experimental controls can report a failure and still change the unit. On a live AY-XP12YHE, FA-frame writes came back `unmatch` (shown in Home Assistant as "The air conditioner rejected the command"), yet the vane position still changed. Rapid also came back `unmatch`, and the unit then briefly reported Strong. Home Assistant does not retry these commands. It refreshes status shortly after any write; trust what it shows, not the error. If the unit is not where you want it, set it again yourself.
+Experimental controls can report a failure and still change the unit. On a live AY-XP12YHE, FA-frame writes came back `unmatch` (shown in Home Assistant as "The air conditioner rejected the command"), yet the vane position still changed. Rapid also came back `unmatch`, and the unit then briefly reported Strong. FA-frame writes are not retried. Power, mode, fan, whole-degree temperature, and Plasmacluster are checked against a later status read and sent at most once more if that read does not show the change. Trust the status, not the error. If the unit is not where you want it, set it again yourself.
 
 To turn them on: **Settings → Devices & services → Sharp Air Egypt → Configure**, then enable **Enable experimental controls**. Soft, Speed, and Cocoro Air appear only after that, and only when that unit's capability data says the feature exists. On the three units above, those bits are off, so those three switches stay hidden.
 
