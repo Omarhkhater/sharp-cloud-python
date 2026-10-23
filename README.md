@@ -74,6 +74,14 @@ To turn them on: **Settings → Devices & services → Sharp Air Control → Con
 
 Vane positions, when enabled: vertical Auto, Up, Horizontal, Down 1, Down 2, Down, and Swing; horizontal Auto, Straight, Left, Right, Wide, Enclose, and Swing. The captured status frames put those values at FA indexes 49 and 50 (section 4.4). Section 4.2's table lists 48 and 49; the frames do not match that numbering.
 
+## Removing the integration
+
+Deleting Sharp Air Control in Home Assistant does not delete it from the Sharp cloud. Setup registers a terminal named **Home Assistant** (`spremote_a_eg`) and pairs it to each air conditioner. That terminal stays paired after you remove the integration.
+
+The cloud has an unpair request (`PUT setting/pairing/` with the terminal id and box id). The live capture never sent it, and the `houseFlag` value for that request is not confirmed, so this integration does not call it.
+
+In the SHARP Air Control app, open the list of signed-in terminals or smartphones if the app shows one, and delete **Home Assistant**. The live account listed the phone as `spremote_i_eg` and this integration as `spremote_a_eg`. There is no confirmed button path beyond that list.
+
 ## If Home Assistant asks you to sign in again
 
 A 401 first retries login with the stored terminal id and cookies. If that fails, Home Assistant starts a re-authentication flow. Repeat the browser sign-in and paste the new address. The same terminal is kept, so the air conditioners stay paired.

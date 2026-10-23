@@ -170,7 +170,10 @@ async def test_reauth_keeps_the_terminal_and_posts_only_the_code(cloud):
     fake, base = cloud
     client = await _client(base, "https://example.invalid/terminal/existing")
     try:
-        account = await client.refresh_with_code("new-code")
+        user_id = await client.refresh_with_code("new-code")
+        paths = [call["path"] for call in fake.calls]
+        assert not any(path.rstrip("/").endswith("pairing") for path in paths)
+        account = await client.finish_setup(register=False)
     finally:
         await client.aclose()
 
@@ -180,6 +183,7 @@ async def test_reauth_keeps_the_terminal_and_posts_only_the_code(cloud):
     body = json.loads(fake.calls[0]["body"])
     assert body["terminalAppId"] == "https://example.invalid/terminal/existing"
     assert body["tempAccToken"] == "new-code"
+    assert user_id == "user-1"
     assert account.terminal_app_id == "https://example.invalid/terminal/existing"
 
 

@@ -25,7 +25,9 @@ def _load_integration(request, monkeypatch):
     """Point Home Assistant's test config at this repo when a test uses hass."""
     # This environment's aiodns build starts a thread Home Assistant's test
     # harness rejects. The integration still asks Home Assistant for the session.
-    monkeypatch.setattr(aiohttp_client, "AsyncResolver", aiohttp.resolver.ThreadedResolver)
+    monkeypatch.setattr(
+        aiohttp_client, "AsyncResolver", aiohttp.resolver.ThreadedResolver, raising=False
+    )
     if "hass" not in request.fixturenames:
         yield
         return

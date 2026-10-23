@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.const import PRECISION_HALVES, PRECISION_WHOLE, EntityCategory
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.sharp_cocoro_air.const import CONF_EXPERIMENTAL, DOMAIN
+from custom_components.sharp_cocoro_air.client import SharpAPIError, SharpClient
+from custom_components.sharp_cocoro_air.const import CONF_EXPERIMENTAL, DOMAIN, PAIR_BACKOFF_SECONDS
+from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator
 from custom_components.sharp_cocoro_air.switch import SWITCHES
 
 COOKIES = [
@@ -20,6 +24,15 @@ COOKIES = [
         "path": "/",
     }
 ]
+
+
+def test_whole_degrees_round_half_up():
+    """22.5 becomes 23. Banker's rounding would leave it at 22."""
+    from custom_components.sharp_cocoro_air.climate import snap_whole_degree
+
+    assert snap_whole_degree(22.5) == 23
+    assert snap_whole_degree(21.4) == 21
+    assert snap_whole_degree(21.5) == 22
 
 
 def test_cocoro_switch_is_config_and_experimental():
@@ -132,6 +145,42 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         assert "1|013001_plasmacluster" in unique_ids
 
     pair.assert_awaited()
+
+
+async def test_rejected_pairing_is_not_retried_on_later_polls(hass, boxinfo):
+    """Four polls of three rejected boxes pair three times, not twelve."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"terminal_app_id": "https://example.invalid/terminal/1", "cookies": []},
+    )
+    entry.add_to_hass(hass)
+    connector = aiohttp.TCPConnector(resolver=aiohttp.resolver.ThreadedResolver())
+    session = aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.CookieJar(unsafe=True))
+    client = SharpClient(session, "https://example.invalid/terminal/1")
+    calls: list[str] = []
+
+    async def reject(box_id: str) -> None:
+        calls.append(box_id)
+        raise SharpAPIError(400)
+
+    client.pair = reject  # type: ignore[method-assign]
+    client.box_info = AsyncMock(return_value=boxinfo)  # type: ignore[method-assign]
+    coordinator = SharpCoordinator(hass, entry, client)
+    try:
+        for _ in range(4):
+            await coordinator._async_update_data()
+        assert len(calls) == 3
+        assert len(set(calls)) == 3
+
+        client._pair_attempted = {
+            box_id: time.monotonic() - PAIR_BACKOFF_SECONDS - 1 for box_id in set(calls)
+        }
+        await coordinator._async_update_data()
+        assert len(calls) == 6
+        await coordinator._async_update_data()
+        assert len(calls) == 6
+    finally:
+        await client.aclose()
 
 
 def _climate(hass, unique_id):

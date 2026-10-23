@@ -82,6 +82,8 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
                         title="Sharp Air Control",
                         data=_entry_data(account),
                     )
+                finally:
+                    client.release()
 
         step_id = "reauth_confirm" if self.source == SOURCE_REAUTH else "user"
         return self.async_show_form(
@@ -103,9 +105,10 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reauth_entry()
         client.terminal_app_id = entry.data.get(CONF_TERMINAL_APP_ID)
         client.restore_cookies(entry.data.get(CONF_COOKIES) or [])
-        account = await client.refresh_with_code(code)
-        await self.async_set_unique_id(account.user_id)
+        user_id = await client.refresh_with_code(code)
+        await self.async_set_unique_id(user_id)
         self._abort_if_unique_id_mismatch()
+        account = await client.finish_setup(register=False)
         return self.async_update_reload_and_abort(entry, data_updates=_entry_data(account))
 
     @staticmethod

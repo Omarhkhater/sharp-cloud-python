@@ -12,7 +12,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .client import SharpAuthError, SharpClient, SharpConnectionError, SharpError
 from .const import CONF_COOKIES, CONF_EXPERIMENTAL, DOMAIN, SCAN_INTERVAL
-from .protocol import Aircon, boxes_missing_terminal, split_box_info, with_updates
+from .protocol import Aircon, split_box_info, with_updates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,11 +47,8 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                 raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
             except SharpError as err:
                 raise UpdateFailed("Could not reach the Sharp cloud") from err
-            for box_id in boxes_missing_terminal(payload, self.client.terminal_app_id):
-                try:
-                    await self.client.pair(box_id)
-                except SharpError:
-                    _LOGGER.debug("Pairing was not accepted")
+            # One attempt per box per entry load, then at most once an hour.
+            await self.client.pair_unlisted(payload)
             _box_ids, devices = split_box_info(payload)
             self._persist_cookies()
             return {device.unique_key: device for device in devices}

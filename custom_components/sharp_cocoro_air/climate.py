@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import ClassVar
 
 from homeassistant.components.climate import (
@@ -51,6 +52,11 @@ _HVAC = {
     MODE_FAN: HVACMode.FAN_ONLY,
 }
 _MODE = {hvac: mode for mode, hvac in _HVAC.items()}
+
+
+def snap_whole_degree(temperature: float) -> float:
+    """Nearest whole degree. Halves round up, including 22.5."""
+    return float(math.floor(temperature + 0.5))
 
 
 async def async_setup_entry(
@@ -234,7 +240,7 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         target = float(temperature)
         half_degree = self.coordinator.experimental and device.caps.half_degree
         if not half_degree:
-            target = float(round(target))
+            target = snap_whole_degree(target)
         status = cmd_setpoint(
             target,
             half_degree=half_degree,

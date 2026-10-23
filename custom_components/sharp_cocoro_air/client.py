@@ -11,6 +11,7 @@ import asyncio
 import json
 import secrets
 import string
+import time
 import urllib.parse
 from dataclasses import dataclass
 
@@ -19,7 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from yarl import URL
 
-from .const import APP_NAME, APP_SECRET, HMS_API, SERVICE_NAME, USER_AGENT
+from .const import APP_NAME, APP_SECRET, HMS_API, PAIR_BACKOFF_SECONDS, SERVICE_NAME, USER_AGENT
 from .protocol import (
     Aircon,
     box_lists_terminal,
@@ -104,11 +105,17 @@ class SharpClient:
         self._base_url = base_url if base_url.endswith("/") else f"{base_url}/"
         self.poll_interval = 1.0
         self.poll_attempts = 20
+        self._pair_attempted: dict[str, float] = {}
 
     async def aclose(self) -> None:
-        """Close the HTTP session."""
+        """Close a session this client owns. Do not use this for Home Assistant's session."""
         if not self._session.closed:
             await self._session.close()
+
+    def release(self) -> None:
+        """Drop a short-lived session without closing Home Assistant's shared connector."""
+        if not self._session.closed:
+            self._session.detach()
 
     def restore_cookies(self, cookies: list[dict]) -> None:
         """Load persisted cookies into the jar."""
@@ -295,13 +302,16 @@ class SharpClient:
         await self.exchange_code(code)
         return await self.finish_setup()
 
-    async def refresh_with_code(self, code: str) -> Account:
-        """Re-auth. Keeps the existing terminal so the boxes stay paired."""
+    async def refresh_with_code(self, code: str) -> str:
+        """Re-login and return the user id. Does not pair.
+
+        The config flow compares that id with the existing entry before
+        ``finish_setup`` pairs anything.
+        """
         if not self.terminal_app_id:
-            return await self.sign_in(code)
+            return await self.exchange_code(code)
         await self.login_with_code(code)
-        await self._load_user_id()
-        return await self.finish_setup(register=False)
+        return await self._load_user_id()
 
     async def _load_user_id(self) -> str:
         info = await self.user_info()
@@ -313,12 +323,23 @@ class SharpClient:
 
     async def pair_missing(self) -> None:
         """Pair this terminal only to boxes that do not already list it."""
-        payload = await self.box_info()
+        await self.pair_unlisted(await self.box_info())
+
+    async def pair_unlisted(self, payload: dict) -> None:
+        """Pair boxes that lack this terminal, at most once an hour each.
+
+        A rejected or offline box is recorded immediately, so the 60-second
+        poll does not write pairing again until the backoff has passed.
+        """
+        now = time.monotonic()
         for box_id in boxes_missing_terminal(payload, self.terminal_app_id):
+            attempted = self._pair_attempted.get(box_id)
+            if attempted is not None and now - attempted < PAIR_BACKOFF_SECONDS:
+                continue
+            self._pair_attempted[box_id] = now
             try:
                 await self.pair(box_id)
-            except SharpAPIError:
-                # Already paired, or the box rejected it. Commands retry pairing.
+            except SharpError:
                 continue
 
     async def terminal_is_paired(self, box_id: str) -> bool:

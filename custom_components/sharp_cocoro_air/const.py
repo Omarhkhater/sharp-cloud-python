@@ -27,6 +27,8 @@ B2C_REDIRECT = "https://sharp-cocoroair-egypt"
 B2C_SCOPE = "openid offline_access"
 
 SCAN_INTERVAL = timedelta(seconds=60)
+# A box that rejects pairing is not tried again on the 60-second poll.
+PAIR_BACKOFF_SECONDS = 60 * 60
 
 # F0 byte 13 selects a per-model range table that was not in the capture.
 # The slider is the usual Sharp remote span. The cloud rejects anything outside it.

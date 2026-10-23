@@ -136,8 +136,12 @@ async def test_reauth_updates_cookies_without_a_new_account(hass):
     with (
         patch(
             "custom_components.sharp_cocoro_air.config_flow.SharpClient.refresh_with_code",
-            new=AsyncMock(return_value=refreshed),
+            new=AsyncMock(return_value="user-1"),
         ) as refresh,
+        patch(
+            "custom_components.sharp_cocoro_air.config_flow.SharpClient.finish_setup",
+            new=AsyncMock(return_value=refreshed),
+        ) as finish,
         patch(
             "custom_components.sharp_cocoro_air.client.SharpClient.box_info",
             new=AsyncMock(return_value={"devices": []}),
@@ -166,6 +170,7 @@ async def test_reauth_updates_cookies_without_a_new_account(hass):
     assert entry.data["terminal_app_id"] == "https://example.invalid/terminal/1"
     refresh.assert_awaited_once()
     assert refresh.await_args.args[0] == "fresh"
+    finish.assert_awaited_once()
 
 
 async def test_second_setup_aborts_before_pairing(hass):
@@ -219,21 +224,15 @@ async def test_reauth_rejects_a_different_account(hass):
         },
     )
     entry.add_to_hass(hass)
-    other = Account(
-        user_id="user-2",
-        terminal_app_id="https://example.invalid/terminal/1",
-        cookies=[
-            {
-                "name": "JSESSIONID",
-                "value": "other",
-                "domain": "eg-hms.cloudlabs.sharp.co.jp",
-                "path": "/",
-            }
-        ],
-    )
-    with patch(
-        "custom_components.sharp_cocoro_air.config_flow.SharpClient.refresh_with_code",
-        new=AsyncMock(return_value=other),
+    with (
+        patch(
+            "custom_components.sharp_cocoro_air.config_flow.SharpClient.refresh_with_code",
+            new=AsyncMock(return_value="user-2"),
+        ),
+        patch(
+            "custom_components.sharp_cocoro_air.config_flow.SharpClient.finish_setup",
+            new=AsyncMock(return_value=ACCOUNT),
+        ) as finish,
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
@@ -251,6 +250,7 @@ async def test_reauth_rejects_a_different_account(hass):
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "unique_id_mismatch"
     assert entry.data["cookies"][0]["value"] == "old"
+    finish.assert_not_awaited()
 
 
 async def test_options_flow_defaults_experimental_controls_off(hass):
