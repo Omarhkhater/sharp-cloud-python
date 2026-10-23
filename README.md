@@ -57,15 +57,13 @@ Each air conditioner:
 | Energy | Cumulative kWh from EPC `85`, using the ECHONET scale of 0.001 kWh per count |
 | Plasmacluster | On/off, EPC `CF` |
 | Fault | On when EPC `88` reports a fault |
-| Super Jet | Read-only. On when FA byte 50 is `01` |
+| Super Jet | Read-only, confirmed. On when FA byte 50 is `01` |
 
-Confirmed live on the Living Room AY-XP12YHE: browser sign-in, terminal pairing, a whole-degree setpoint (21 °C → 22 °C → 21 °C, EPC `B3`), power on and off (`80` = `30` and `80` = `31`, `valueSingle`), and fan Auto (`A0` = `41`, `valueSingle`).
+Confirmed live on the Living Room AY-XP12YHE: browser sign-in, terminal pairing, a whole-degree setpoint (21 °C → 22 °C → 21 °C, EPC `B3`), power on and off (`80` = `30` and `80` = `31`, `valueSingle`), fan Auto (`A0` = `41`, `valueSingle`), mode (`B0` = `45` fan only and `B0` = `42` cool, `valueSingle`), and Plasmacluster (`CF` = `42` off and `CF` = `41` on, `valueSingle`).
 
 Fan Rapid (`A0` = `38`) was rejected. `controlResult` came back `unmatch`, and the unit briefly reported `37` (Strong). Rapid is hidden unless experimental controls are on, and the label says it may be unsupported. Do not expect it to stick.
 
-Super Jet is readable at FA byte 50 (`01` on, `00` off). A sparse FA write of 1-based index 51 = `01` was also rejected with `unmatch`. There is a binary sensor and no switch.
-
-Mode and Plasmacluster are the same kind of single-EPC write and still need one supervised test each.
+Super Jet is read from FA byte 50 (`01` on, `00` off). Turning it on from the physical remote showed `01` in the cloud within seconds, so the read-only sensor matches the unit. A sparse FA write of 1-based index 51 = `01` was rejected with `unmatch`. There is a binary sensor and no switch.
 
 The temperature slider runs from 16 °C to 30 °C. F0 names a per-model range table, but that table was not in the capture, so the slider uses this span. The cloud rejects a value the unit cannot use.
 
@@ -97,9 +95,9 @@ A 401 first retries login with the stored terminal id and cookies. If that fails
 
 Use one unit, then put it back. Leave experimental controls off for this pass.
 
-1. Confirm all three units appear, with the right on/off state, mode, room temperature, and setpoint.
+1. Confirm all three units appear, with the right on/off state, mode, room temperature, and setpoint. Super Jet follows the physical remote: on shows FA byte 50 = `01` within seconds. That read was confirmed.
 2. Change the setpoint by 1 °C, wait until the app shows the same number, then change it back. This path was confirmed live.
-3. Change the mode, then a fan speed other than Rapid, then Plasmacluster. Put each one back. Mode and Plasmacluster still need one supervised test. Fan Auto was confirmed live. Leave Rapid off.
+3. Cool, Fan only, fan Auto, and Plasmacluster were confirmed live. Quiet, Very weak, Weak, and Strong have not been written yet. Leave Rapid off.
 4. Power on and power off were confirmed live (`80` = `30` and `80` = `31`). You can still turn the unit off and on once and put it back.
 5. Compare **Power** (W) with the unit while it is cooling, and compare **Energy** (kWh) with the app's energy graph. Energy uses the standard ECHONET scaling and has not been checked against the app's graph.
 6. Restart Home Assistant and confirm the units come back without another sign-in.
