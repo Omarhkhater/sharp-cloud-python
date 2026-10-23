@@ -478,6 +478,8 @@ def test_package_metadata():
     assert manifest["version"] == "0.2.2"
     assert manifest["name"] == "Sharp Air Egypt"
     assert manifest["domain"] == "sharp_cocoro_air"
+    assert manifest["documentation"] == "https://github.com/Omarhkhater/sharp-air-egypt-ha"
+    assert manifest["issue_tracker"] == "https://github.com/Omarhkhater/sharp-air-egypt-ha/issues"
     assert "quality_scale" not in manifest
     assert "domains" not in hacs
     assert hacs["name"] == "Sharp Air Egypt"
@@ -487,8 +489,11 @@ def test_package_metadata():
     assert "password" not in strings.lower()
     assert hacs["homeassistant"] == "2025.1.0"
     readme = (ROOT / "README.md").read_text()
+    changelog = (ROOT / "CHANGELOG.md").read_text()
     assert "2026.3" in readme
-    assert "placeholder" in readme
+    assert "https://github.com/Omarhkhater/sharp-air-egypt-ha" in readme
+    assert "sharp-cloud-python" not in readme
+    assert "sharp-cloud-python" not in changelog
 
 
 def test_brand_logo_is_the_supplied_png():
