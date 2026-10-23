@@ -43,6 +43,18 @@ class SharpConnectionError(SharpError):
     """The cloud could not be reached."""
 
 
+class SharpCommandRejected(SharpError):
+    """deviceControl returned an id and controlResult was not success.
+
+    The write was accepted. The coordinator still reads status afterwards.
+    """
+
+    def __init__(self, result: str) -> None:
+        """Remember the result word without putting it in the message."""
+        super().__init__("The air conditioner rejected the command")
+        self.result = result
+
+
 class SharpAPIError(SharpError):
     """The cloud returned an HTTP error."""
 
@@ -401,5 +413,5 @@ class SharpClient:
                 continue
             if state == "success":
                 return
-            raise SharpError("The air conditioner rejected the command")
-        raise SharpError("The air conditioner did not confirm the command")
+            raise SharpCommandRejected(str(state))
+        raise SharpCommandRejected("timeout")

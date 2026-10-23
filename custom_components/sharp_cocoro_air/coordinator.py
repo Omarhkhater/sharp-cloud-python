@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .client import SharpAuthError, SharpClient, SharpConnectionError, SharpError
+from .client import (
+    SharpAuthError,
+    SharpClient,
+    SharpCommandRejected,
+    SharpConnectionError,
+    SharpError,
+)
 from .const import CONF_COOKIES, CONF_EXPERIMENTAL, DOMAIN, SCAN_INTERVAL
 from .protocol import Aircon, split_box_info, with_updates
 
@@ -54,13 +62,22 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             return {device.unique_key: device for device in devices}
 
     async def async_send(self, key: str, status: list[dict], **updates: Any) -> None:
-        """Run a command and apply the change locally when it succeeds."""
+        """Run a command and apply the change locally when it succeeds.
+
+        A control id means the cloud accepted the write. Success and unmatch
+        both schedule one status read. The command is not sent again.
+        """
         if not self.data or key not in self.data:
             raise HomeAssistantError("That air conditioner is not available")
         device = self.data[key]
+        accepted = False
+        rejected = False
         async with self._lock:
             try:
                 await self.client.send_control(device, status)
+            except SharpCommandRejected:
+                accepted = True
+                rejected = True
             except SharpAuthError:
                 self.entry.async_start_reauth(self.hass)
                 raise HomeAssistantError(
@@ -70,10 +87,26 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                 raise HomeAssistantError("Could not reach the Sharp cloud") from None
             except SharpError:
                 raise HomeAssistantError("The air conditioner rejected the command") from None
-            data = dict(self.data)
-            data[key] = with_updates(device, **updates)
-            self.async_set_updated_data(data)
-            self._persist_cookies()
+            else:
+                accepted = True
+                data = dict(self.data)
+                data[key] = with_updates(device, **updates)
+                self.async_set_updated_data(data)
+                self._persist_cookies()
+        # _async_update_data takes this same lock, so the timer is armed out here.
+        if accepted:
+            self._schedule_status_refresh()
+        if rejected:
+            raise HomeAssistantError("The air conditioner rejected the command")
+
+    def _schedule_status_refresh(self) -> None:
+        """Read status 15 seconds after an accepted write. Do not resend it."""
+        unsub = async_call_later(self.hass, 15, self._refresh_after_write)
+        self.entry.async_on_unload(unsub)
+
+    async def _refresh_after_write(self, _now: datetime) -> None:
+        """Fetch boxInfo. This does not repeat the command."""
+        await self.async_request_refresh()
 
     def _persist_cookies(self) -> None:
         """Store the jar when the session id changes.
