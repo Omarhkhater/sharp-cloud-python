@@ -215,7 +215,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         return held
 
     def _overlay_pending(self, data: dict[str, Aircon]) -> None:
-        """Keep a write on screen until the poll shows it or the grace period ends."""
+        """Keep every unexpired write until the poll shows all of them."""
         now = _monotonic()
         for key in list(self._pending):
             updates, expires = self._pending[key]
@@ -247,9 +247,10 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
     ) -> None:
         """Build the frame under the box lock from the current device.
 
-        A command whose fields already match that device is not sent. Queued
-        vane picks therefore copy the status from after the previous write,
-        and picking the position the unit is already in does nothing.
+        A command whose fields already match that device is not sent. Only
+        the fields passed in this call are changes. Any other byte, including
+        the other vane, is copied from that device and is not taken from an
+        earlier pick.
         """
         await self._async_send(key, build, updates, skip_if_applied=True)
 
@@ -397,14 +398,25 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         return "unmatch"
 
     def _apply_optimistic(self, key: str, updates: dict[str, Any]) -> None:
-        """Show the write now, and keep it across a stale poll for a short while."""
+        """Show the write now, and keep it across a stale poll for a short while.
+
+        A later write inside that window is merged with the earlier one, and
+        the window starts again. A stale poll then still shows both.
+        """
         if not updates:
             return
-        self._pending[key] = (dict(updates), _monotonic() + PENDING_GRACE_S)
+        now = _monotonic()
+        merged = dict(updates)
+        previous = self._pending.get(key)
+        if previous is not None:
+            prev_updates, expires = previous
+            if now < expires:
+                merged = {**prev_updates, **updates}
+        self._pending[key] = (merged, now + PENDING_GRACE_S)
         if not self.data or key not in self.data:
             return
         data = dict(self.data)
-        data[key] = with_updates(self.data[key], **updates)
+        data[key] = with_updates(self.data[key], **merged)
         self.async_set_updated_data(data)
         self._persist_cookies()
 

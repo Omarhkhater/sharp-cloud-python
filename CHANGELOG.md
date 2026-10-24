@@ -10,6 +10,9 @@ All notable changes to Sharp Air Egypt are listed here. Versions follow the GitH
 - A command the cloud refuses says whether the unit is busy, names the refusal code, or names the HTTP status. A status refresh follows every failed write. A failed read-back still says the change could not be confirmed.
 - HomeKit Bridge: a target temperature is snapped to the unit's step before it is sent, and Super Jet is a diagnostic sensor so it is not exposed as occupancy.
 
+### Known limitations
+- For up to 30 seconds after a change from Home Assistant, a change made in the SHARP app may not show in Home Assistant, because a lagging cloud reading and a real app change look the same.
+
 ## [0.3.0] - 2026-10-24
 
 ### Added

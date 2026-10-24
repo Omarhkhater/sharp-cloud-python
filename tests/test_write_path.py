@@ -44,6 +44,7 @@ from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator, _ca
 from custom_components.sharp_cocoro_air.protocol import (
     Aircon,
     Capabilities,
+    cmd_mode,
     cmd_setpoint,
     cmd_vanes,
 )
@@ -130,9 +131,19 @@ def _coordinator(hass, cloud: _Cloud, *devices: Aircon) -> SharpCoordinator:
     return coordinator
 
 
-def _status_payload(temp: int, *, box_id: str = "box-1", device_id: int = 1) -> dict:
-    """boxInfo with one B3 setpoint. Enough for the verify read to decode."""
-    raw = bytes([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, 0x01, 0xB3, 0x01, temp])
+def _status_payload(
+    temp: int, *, box_id: str = "box-1", device_id: int = 1, mode: int | None = None
+) -> dict:
+    """boxInfo with a B3 setpoint, and an optional B0 mode."""
+    props: list[tuple[int, bytes]] = []
+    if mode is not None:
+        props.append((0xB0, bytes([mode])))
+    props.append((0xB3, bytes([temp])))
+    raw = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
+    for epc, edt in props:
+        raw.append(epc)
+        raw.append(len(edt))
+        raw.extend(edt)
     return {
         "devices": [
             {
@@ -300,6 +311,48 @@ async def test_stale_poll_keeps_the_pending_target_until_it_matches_or_expires(h
         data = await coordinator._async_update_data()
         assert device.unique_key not in coordinator._pending
         assert data[device.unique_key].setpoint == 21.0
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_stale_poll_keeps_both_vane_writes(hass, monkeypatch):
+    """Vertical down, then horizontal left, still both show after a stale poll."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_mode("down")
+        await entity.async_set_swing_horizontal_mode("left")
+        cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01)
+        data = await coordinator._async_update_data()
+        current = data[device.unique_key]
+        assert current.vane_vertical == "down"
+        assert current.vane_horizontal == "left"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_stale_poll_keeps_a_mode_and_a_later_setpoint(hass, monkeypatch):
+    """A mode change and a later setpoint both survive a poll that shows neither."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _device(setpoint=21.0)
+    coordinator = _coordinator(hass, cloud, device)
+    try:
+        await coordinator.async_send(device.unique_key, cmd_mode("heat"), power=True, mode="heat")
+        await coordinator.async_send(
+            device.unique_key,
+            cmd_setpoint(24, half_degree=False, frame_end=device.frame_end),
+            setpoint=24.0,
+        )
+        cloud.payload = _status_payload(21, mode=0x42)
+        data = await coordinator._async_update_data()
+        current = data[device.unique_key]
+        assert current.mode == "heat"
+        assert current.setpoint == 24.0
     finally:
         await coordinator.async_shutdown()
 
@@ -1320,20 +1373,27 @@ async def test_later_horizontal_pick_uses_fresh_vertical_status(hass, monkeypatc
         await coordinator.async_shutdown()
 
 
-async def test_app_vane_change_shows_inside_the_grace_window(hass, monkeypatch):
-    """A status that differs from the pick replaces it before the 30 s grace ends."""
+async def test_poll_inside_the_grace_keeps_the_ha_vane_pick(hass, monkeypatch):
+    """A poll that differs within 30 s does not replace the Home Assistant pick.
+
+    A lagging cloud reading and a change made in the Sharp app look the same,
+    so the card keeps the pick until the grace ends. After that, the poll shows.
+    """
     clock = _install_clock(monkeypatch)
-    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
     cloud = _Cloud(clock)
-    device = _vane_device(vertical="up")
+    device = _vane_device(vertical="up", horizontal="straight")
     coordinator = _coordinator(hass, cloud, device)
     entity = await _climate(hass, coordinator, device)
     try:
         await entity.async_set_swing_mode("down")
         assert entity.swing_mode == "down"
-        assert entity._pending_vanes == {}
-        assert clock.now < entity._pending_vanes_until
-        coordinator.data[device.unique_key].vane_vertical = "up"
+        cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01)
+        await coordinator.async_refresh()
+        assert coordinator.data[device.unique_key].vane_vertical == "down"
+        assert entity.swing_mode == "down"
+        clock.now += PENDING_GRACE_S
+        await coordinator.async_refresh()
+        assert coordinator.data[device.unique_key].vane_vertical == "up"
         assert entity.swing_mode == "up"
     finally:
         await entity.async_remove()
