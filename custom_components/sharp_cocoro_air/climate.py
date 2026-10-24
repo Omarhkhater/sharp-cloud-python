@@ -89,10 +89,12 @@ def _is_half_step(temperature: float) -> bool:
 
 
 def _vane_frame(device: Aircon, wanted: dict[str, str]) -> list[dict]:
-    """FA frame for the latest vane pick, copied from this device's status.
+    """FA frame for the vane this send is changing.
 
-    ``wanted`` names the positions the user picked. The other vane comes from
-    the device passed in, which the coordinator reads under the write lock.
+    ``wanted`` holds only that vane. The other vane is copied from ``device``,
+    which the coordinator reads under the write lock, and is not taken from
+    an earlier pick. Copying it leaves the byte as the current status; it is
+    not a separate command.
     """
     vertical = wanted.get("vane_vertical")
     if vertical is None:
@@ -171,7 +173,10 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             name=device.name,
         )
         self._pending_target: float | None = None
+        # Unsent vane picks. Cleared when that send succeeds.
         self._pending_vanes: dict[str, str] = {}
+        # Display-only copy of the last successful pick, for the 30 s card grace.
+        self._shown_vanes: dict[str, str] = {}
         self._pending_vanes_until = 0.0
         self._vane_send_running = False
         self._debounce_unsub = None
@@ -297,20 +302,23 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         return None if device is None else device.fan
 
     def _shown_vane(self, key: str, actual: str | None) -> str | None:
-        """The pick while a send is in progress, then for 30 s after it finishes.
+        """The pick while its send is in progress, then until a new status arrives.
 
-        The grace period starts when the send ends. Until then the expiry is
-        unset, so a slow read-back cannot snap the card back to the old value.
+        The 30 s grace starts when the send ends and only covers a status that
+        still matches the pick, or a missing one. A coordinator value that
+        differs, including a change made in the Sharp app, shows immediately.
         """
-        pending = self._pending_vanes.get(key)
-        if pending is None:
-            return actual
+        if self._vane_send_running:
+            pending = self._pending_vanes.get(key)
+            if pending is not None:
+                return pending
+        shown = self._shown_vanes.get(key)
         if (
-            self._vane_send_running
-            or self._pending_vanes_until <= 0.0
-            or _monotonic() < self._pending_vanes_until
+            shown is not None
+            and _monotonic() < self._pending_vanes_until
+            and (actual is None or actual == shown)
         ):
-            return pending
+            return shown
         return actual
 
     @property
@@ -354,7 +362,13 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             device = self._device or device
         if target is None:
             return
-        if device.setpoint is not None and target == device.setpoint:
+        # Ignore a repeat of the current setpoint only when nothing is queued.
+        # 21→22→21 inside the debounce must replace 22, or the flush sends 22.
+        if (
+            self._pending_target is None
+            and device.setpoint is not None
+            and target == device.setpoint
+        ):
             return
         self._pending_target = target
         self.async_write_ha_state()
@@ -377,6 +391,14 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             await self._fail_setpoint(
                 waiters, HomeAssistantError("That air conditioner is not available")
             )
+            return
+        if device.setpoint is not None and target == device.setpoint:
+            if not self._waiters:
+                self._pending_target = None
+            self.async_write_ha_state()
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(None)
             return
         half_degree = device.caps.half_degree
         try:
@@ -437,11 +459,19 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set the vertical vane. The frame also carries the current horizontal position."""
+        """Set the vertical vane.
+
+        Only that vane is a change. The horizontal byte is left as the current
+        status and is not sent as its own command.
+        """
         await self._async_set_vanes(vertical=swing_mode)
 
     async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
-        """Set the horizontal vane. The frame also carries the current vertical position."""
+        """Set the horizontal vane.
+
+        Only that vane is a change. The vertical byte is left as the current
+        status and is not sent as its own command.
+        """
         await self._async_set_vanes(horizontal=swing_horizontal_mode)
 
     async def _async_set_vanes(
@@ -476,16 +506,22 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
                     )
                 except HomeAssistantError:
                     if self._pending_vanes == wanted:
+                        for key in wanted:
+                            self._shown_vanes.pop(key, None)
                         self._pending_vanes.clear()
                         self._pending_vanes_until = 0.0
                         self.async_write_ha_state()
                         raise
                     continue
-                if self._pending_vanes == wanted:
+                for key, value in wanted.items():
+                    if self._pending_vanes.get(key) == value:
+                        self._pending_vanes.pop(key, None)
+                        self._shown_vanes[key] = value
+                if not self._pending_vanes:
                     break
         finally:
             self._vane_send_running = False
-        if self._pending_vanes:
+        if self._shown_vanes:
             self._pending_vanes_until = _monotonic() + PENDING_GRACE_S
             self.async_write_ha_state()
 

@@ -864,6 +864,65 @@ async def test_homekit_tenths_that_snap_to_the_current_value_are_not_sent(hass, 
         await coordinator.async_shutdown()
 
 
+async def test_setpoint_returns_to_current_inside_the_debounce(hass, monkeypatch):
+    """21→22→21 before the debounce ends stays at 21 and does not send 22."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 22}))
+    try:
+        await asyncio.sleep(0)
+        assert entity.target_temperature == 22
+        second = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 21}))
+        await asyncio.sleep(0)
+        assert entity._pending_target == 21
+        assert entity.target_temperature == 21
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+        await hass.async_block_till_done()
+        assert first.exception() is None
+        assert second.exception() is None
+        assert cloud.sent == []
+        assert entity.target_temperature == 21.0
+        state = hass.states.get(entity.entity_id)
+        assert state is not None
+        assert state.attributes["temperature"] == 21.0
+    finally:
+        if not first.done():
+            first.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_homekit_drag_back_to_the_start_sends_nothing(hass, monkeypatch):
+    """21.3 then 21.2 on a unit at 21 snaps to 21.5, then back to 21, with no send."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    device.caps = Capabilities(half_degree=True)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.3}))
+    try:
+        await asyncio.sleep(0)
+        assert entity._pending_target == 21.5
+        second = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.2}))
+        await asyncio.sleep(0)
+        assert entity._pending_target == 21.0
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+        await hass.async_block_till_done()
+        assert first.exception() is None
+        assert second.exception() is None
+        assert cloud.sent == []
+        assert entity.target_temperature == 21.0
+    finally:
+        if not first.done():
+            first.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
 async def test_homekit_tenths_on_a_whole_degree_unit_snap_before_sending(hass, monkeypatch):
     """A unit without half degrees snaps 21.4 to 21 (no send) and 21.6 to 22."""
     _install_clock(monkeypatch)
@@ -1087,7 +1146,8 @@ async def test_vane_pick_shows_while_the_call_is_in_flight(hass, monkeypatch, ki
         await task
         assert _vane_state(entity, kind) == pick
         key = "vane_vertical" if kind == "vertical" else "vane_horizontal"
-        assert entity._pending_vanes.get(key) == pick
+        assert key not in entity._pending_vanes
+        assert entity._shown_vanes.get(key) == pick
         assert entity._pending_vanes_until > 0
     finally:
         if not task.done():
@@ -1232,6 +1292,54 @@ async def test_down1_and_down2_copy_the_other_vane_from_fresh_data(hass, monkeyp
         await coordinator.async_shutdown()
 
 
+async def test_later_horizontal_pick_uses_fresh_vertical_status(hass, monkeypatch):
+    """A vertical pick is not repeated after the app has changed that vane."""
+    clock = _install_clock(monkeypatch)
+    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_mode("down")
+        first = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        assert first[48] == 0x05
+        assert entity._pending_vanes == {}
+        clock.now += PENDING_GRACE_S + 1
+        current = coordinator.data[device.unique_key]
+        frame = bytearray(current.fa_frame or b"")
+        frame[48] = 0x01
+        current.fa_frame = bytes(frame)
+        current.vane_vertical = "up"
+        await entity.async_set_swing_horizontal_mode("left")
+        last = bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])
+        assert last[48] == 0x01
+        assert last[49] == 0x02
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_app_vane_change_shows_inside_the_grace_window(hass, monkeypatch):
+    """A status that differs from the pick replaces it before the 30 s grace ends."""
+    clock = _install_clock(monkeypatch)
+    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_mode("down")
+        assert entity.swing_mode == "down"
+        assert entity._pending_vanes == {}
+        assert clock.now < entity._pending_vanes_until
+        coordinator.data[device.unique_key].vane_vertical = "up"
+        assert entity.swing_mode == "up"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
 async def test_horizontal_positions_copy_the_vertical_byte_from_fresh_data(hass, monkeypatch):
     """Left and swing use bytes 02 and 0F. The vertical byte is read at send time."""
     _install_clock(monkeypatch)
@@ -1291,19 +1399,23 @@ async def test_pattern_02_hides_fully_down_in_heat_and_auto(hass, monkeypatch):
 
 
 async def test_pending_vane_expires_after_thirty_seconds(hass, monkeypatch):
-    """A pick older than the grace period no longer covers the status reading."""
-    device = _vane_device()
+    """A matching pick shows during the grace period. After that, status shows."""
+    device = _vane_device(vertical="swing", horizontal="left")
     coordinator = _coordinator(hass, _Cloud(_Clock()), device)
     entity = await _climate(hass, coordinator, device)
-    entity._pending_vanes = {"vane_vertical": "swing", "vane_horizontal": "left"}
+    entity._shown_vanes = {"vane_vertical": "swing", "vane_horizontal": "left"}
     entity._pending_vanes_until = 50.0
     try:
         monkeypatch.setattr(climate_mod, "_monotonic", lambda: 49.0)
         assert entity.swing_mode == "swing"
         assert entity.swing_horizontal_mode == "left"
+        device.vane_vertical = None
+        device.vane_horizontal = None
+        assert entity.swing_mode == "swing"
+        assert entity.swing_horizontal_mode == "left"
         monkeypatch.setattr(climate_mod, "_monotonic", lambda: 50.0)
-        assert entity.swing_mode == "up"
-        assert entity.swing_horizontal_mode == "straight"
+        assert entity.swing_mode is None
+        assert entity.swing_horizontal_mode is None
     finally:
         await entity.async_remove()
         await coordinator.async_shutdown()
@@ -1426,9 +1538,12 @@ async def test_pending_vane_does_not_expire_while_the_send_is_running(hass, monk
         cloud.hold.set()
         await task
         assert entity._vane_send_running is False
+        assert entity._pending_vanes == {}
+        assert entity._shown_vanes.get("vane_vertical") == "down"
         assert entity._pending_vanes_until == clock.now + PENDING_GRACE_S
-        coordinator.data[device.unique_key].vane_vertical = "up"
         assert entity.swing_mode == "down"
+        coordinator.data[device.unique_key].vane_vertical = "up"
+        assert entity.swing_mode == "up"
         clock.now = entity._pending_vanes_until
         assert entity.swing_mode == "up"
     finally:
