@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from datetime import datetime
 from typing import ClassVar
 
@@ -33,6 +34,7 @@ from .const import (
     MODE_DRY,
     MODE_FAN,
     MODE_HEAT,
+    PENDING_GRACE_S,
     SETPOINT_DEBOUNCE_S,
     TEMP_MAX,
     TEMP_MIN,
@@ -61,6 +63,11 @@ _HVAC = {
 _MODE = {hvac: mode for mode, hvac in _HVAC.items()}
 
 
+def _monotonic() -> float:
+    """Clock for how long a vane pick stays on the card before it expires."""
+    return time.monotonic()
+
+
 def _known_vane(name: str | None) -> str | None:
     """A vane name the frame builder can encode. Unknown readings are left out."""
     if name is None:
@@ -79,6 +86,34 @@ def _is_half_step(temperature: float) -> bool:
     """True for 21.5, false for 21 or 22."""
     doubled = round(temperature * 2)
     return abs(temperature * 2 - doubled) < 1e-6 and doubled % 2 == 1
+
+
+def _vane_frame(device: Aircon, wanted: dict[str, str]) -> list[dict]:
+    """FA frame for the vane this send is changing.
+
+    ``wanted`` holds only that vane. The other vane comes from ``device``.
+    The coordinator fills that from fresh status, and from an earlier pick
+    only while that field's own deadline has not passed.
+    """
+    vertical = wanted.get("vane_vertical")
+    if vertical is None:
+        vertical = _known_vane(device.vane_vertical)
+    horizontal = wanted.get("vane_horizontal")
+    if horizontal is None:
+        horizontal = _known_vane(device.vane_horizontal)
+    status = cmd_vanes(
+        vertical=vertical,
+        horizontal=horizontal,
+        frame_end=device.frame_end,
+        current=device.fa_frame,
+    )
+    code = str(status[0]["valueBinary"]["code"])
+    if fa_payload_is_blank(code):
+        raise HomeAssistantError(
+            "Sharp would reject that command because its payload is empty. "
+            "Wait for a status reading and try again."
+        )
+    return status
 
 
 async def async_setup_entry(
@@ -137,6 +172,12 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             name=device.name,
         )
         self._pending_target: float | None = None
+        # Unsent vane picks. Cleared when that send succeeds.
+        self._pending_vanes: dict[str, str] = {}
+        # Display-only copy of the last successful pick. Each field has its own deadline.
+        self._shown_vanes: dict[str, str] = {}
+        self._shown_until: dict[str, float] = {}
+        self._vane_send_running = False
         self._debounce_unsub = None
         self._waiters: list[asyncio.Future[None]] = []
 
@@ -187,13 +228,22 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         """The same step the capability byte allows."""
         return self.precision
 
+    def _vertical_modes(self, device: Aircon) -> list[str] | None:
+        """Vertical positions. Pattern 02 hides Fully down in heat and auto."""
+        if not device.caps.vertical_vanes:
+            return None
+        modes = list(device.caps.vertical_vanes)
+        if device.caps.vertical_pattern == 2 and device.mode in {MODE_HEAT, MODE_AUTO}:
+            return [mode for mode in modes if mode != "down"]
+        return modes
+
     @property
     def swing_modes(self) -> list[str] | None:
         """Vertical vane positions from the capability bytes."""
         device = self._device
-        if device is None or not device.caps.vertical_vanes:
+        if device is None:
             return None
-        return list(device.caps.vertical_vanes)
+        return self._vertical_modes(device)
 
     @property
     def swing_horizontal_modes(self) -> list[str] | None:
@@ -250,17 +300,39 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         device = self._device
         return None if device is None else device.fan
 
+    def _shown_vane(self, key: str, actual: str | None) -> str | None:
+        """The pick while its send is in progress, then until a new status arrives.
+
+        The 30 s grace starts when the send ends and only covers a status that
+        still matches the pick, or a missing one. A coordinator value that
+        differs, including a change made in the Sharp app, shows immediately.
+        """
+        if self._vane_send_running:
+            pending = self._pending_vanes.get(key)
+            if pending is not None:
+                return pending
+        shown = self._shown_vanes.get(key)
+        if (
+            shown is not None
+            and _monotonic() < self._shown_until.get(key, 0.0)
+            and (actual is None or actual == shown)
+        ):
+            return shown
+        return actual
+
     @property
     def swing_mode(self) -> str | None:
-        """Vertical vane position."""
+        """Vertical vane position. A recent pick shows before the cloud answers."""
         device = self._device
-        return None if device is None else device.vane_vertical
+        actual = None if device is None else device.vane_vertical
+        return self._shown_vane("vane_vertical", actual)
 
     @property
     def swing_horizontal_mode(self) -> str | None:
-        """Horizontal vane position."""
+        """Horizontal vane position. A recent pick shows before the cloud answers."""
         device = self._device
-        return None if device is None else device.vane_horizontal
+        actual = None if device is None else device.vane_horizontal
+        return self._shown_vane("vane_horizontal", actual)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Turn the unit off, or on into the selected mode."""
@@ -275,16 +347,28 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         device = self._device
         if device is None:
             return
+        temperature = kwargs.get(ATTR_TEMPERATURE)
+        target: float | None = None
+        if temperature is not None:
+            # HomeKit sends tenths. Snap before any write so 21.3 is 21.5.
+            raw = float(temperature)
+            if device.caps.half_degree:
+                target = round(raw * 2) / 2
+            else:
+                target = snap_whole_degree(raw)
         if kwargs.get(ATTR_HVAC_MODE) not in (None, HVACMode.OFF):
             await self.async_set_hvac_mode(kwargs[ATTR_HVAC_MODE])
             device = self._device or device
-        temperature = kwargs.get(ATTR_TEMPERATURE)
-        if temperature is None:
+        if target is None:
             return
-        target = float(temperature)
-        half_degree = device.caps.half_degree
-        if not half_degree:
-            target = snap_whole_degree(target)
+        # Ignore a repeat of the current setpoint only when nothing is queued.
+        # 21→22→21 inside the debounce must replace 22, or the flush sends 22.
+        if (
+            self._pending_target is None
+            and device.setpoint is not None
+            and target == device.setpoint
+        ):
+            return
         self._pending_target = target
         self.async_write_ha_state()
         if self._debounce_unsub is not None:
@@ -306,6 +390,14 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             await self._fail_setpoint(
                 waiters, HomeAssistantError("That air conditioner is not available")
             )
+            return
+        if device.setpoint is not None and target == device.setpoint:
+            if not self._waiters:
+                self._pending_target = None
+            self.async_write_ha_state()
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(None)
             return
         half_degree = device.caps.half_degree
         try:
@@ -366,48 +458,71 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set the vertical vane. Both vane bytes go out in one frame."""
+        """Set the vertical vane.
+
+        Only that vane is a change. The horizontal byte is left as the current
+        status and is not sent as its own command.
+        """
         await self._async_set_vanes(vertical=swing_mode)
 
     async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
-        """Set the horizontal vane. Both vane bytes go out in one frame."""
+        """Set the horizontal vane.
+
+        Only that vane is a change. The vertical byte is left as the current
+        status and is not sent as its own command.
+        """
         await self._async_set_vanes(horizontal=swing_horizontal_mode)
 
     async def _async_set_vanes(
         self, *, vertical: str | None = None, horizontal: str | None = None
     ) -> None:
-        """Send the vane that changed and the other vane's current position."""
+        """Show the pick at once. A later pick replaces one that is still sending."""
         device = self._device
         if device is None:
             return
-        if vertical is not None and vertical not in device.caps.vertical_vanes:
+        offered = self._vertical_modes(device)
+        if vertical is not None and (offered is None or vertical not in offered):
             raise ServiceValidationError("This air conditioner does not support that vane position")
         if horizontal is not None and horizontal not in device.caps.horizontal_vanes:
             raise ServiceValidationError("This air conditioner does not support that vane position")
-        sent_vertical = vertical if vertical is not None else _known_vane(device.vane_vertical)
-        sent_horizontal = (
-            horizontal if horizontal is not None else _known_vane(device.vane_horizontal)
-        )
-        if sent_vertical is None and sent_horizontal is None:
+        if vertical is not None:
+            self._pending_vanes["vane_vertical"] = vertical
+        if horizontal is not None:
+            self._pending_vanes["vane_horizontal"] = horizontal
+        if self._vane_send_running:
+            self.async_write_ha_state()
             return
-        status = cmd_vanes(
-            vertical=sent_vertical,
-            horizontal=sent_horizontal,
-            frame_end=device.frame_end,
-            current=device.fa_frame,
-        )
-        code = str(status[0]["valueBinary"]["code"])
-        if fa_payload_is_blank(code):
-            raise HomeAssistantError(
-                "Sharp would reject that command because its payload is empty. "
-                "Wait for a status reading and try again."
-            )
-        updates: dict[str, str] = {}
-        if sent_vertical is not None:
-            updates["vane_vertical"] = sent_vertical
-        if sent_horizontal is not None:
-            updates["vane_horizontal"] = sent_horizontal
-        await self.coordinator.async_send(self._key, status, **updates)
+        self._vane_send_running = True
+        self.async_write_ha_state()
+        try:
+            while True:
+                wanted = dict(self._pending_vanes)
+                try:
+                    await self.coordinator.async_send_built(
+                        self._key,
+                        lambda fresh, picked=wanted: _vane_frame(fresh, picked),
+                        **wanted,
+                    )
+                except HomeAssistantError:
+                    if self._pending_vanes == wanted:
+                        for key in wanted:
+                            self._shown_vanes.pop(key, None)
+                            self._shown_until.pop(key, None)
+                        self._pending_vanes.clear()
+                        self.async_write_ha_state()
+                        raise
+                    continue
+                now = _monotonic()
+                for key, value in wanted.items():
+                    if self._pending_vanes.get(key) == value:
+                        self._pending_vanes.pop(key, None)
+                        self._shown_vanes[key] = value
+                        self._shown_until[key] = now + PENDING_GRACE_S
+                if not self._pending_vanes:
+                    break
+        finally:
+            self._vane_send_running = False
+        self.async_write_ha_state()
 
     async def async_turn_on(self) -> None:
         """Power on without changing the mode."""

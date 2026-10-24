@@ -2,6 +2,17 @@
 
 All notable changes to Sharp Air Egypt are listed here. Versions follow the GitHub releases.
 
+## [0.3.1] - 2026-10-24
+
+### Fixed
+- Vertical airflow lists the same seven positions as the SHARP app: Auto, Up, Level, Slightly down, Further down, Fully down, and Swing. The position previously called Horizontal is now Level, and its state value changed from `horizontal` to `level`.
+- Choosing a vane position shows on the card immediately. If the change fails, the card snaps back. Picking again while a change is still in progress sends the latest choice.
+- A command the cloud refuses says whether the unit is busy, names the refusal code, or names the HTTP status. A status refresh follows every failed write. A failed read-back still says the change could not be confirmed.
+- HomeKit Bridge: a target temperature is snapped to the unit's step before it is sent, and Super Jet is a diagnostic sensor so it is not exposed as occupancy.
+
+### Known limitations
+- For up to 30 seconds after a change from Home Assistant, a change to that same setting made in the SHARP app may not show in Home Assistant. Each setting has its own 30 seconds, so a later change to a different setting does not keep the earlier one hidden. A lagging cloud reading and a real app change look the same.
+
 ## [0.3.0] - 2026-10-24
 
 ### Added
@@ -49,6 +60,7 @@ After updating, restart Home Assistant. You don't need to re-add the integration
 - Browser sign-in (no password stored), climate entity, outdoor temperature, power and energy sensors, Plasmacluster switch, fault and Super Jet (read-only) binary sensors.
 - Opt-in experimental controls (airflow, half degrees, Rapid, Sleep/Soft/Speed/Cocoro Air).
 
+[0.3.1]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.1

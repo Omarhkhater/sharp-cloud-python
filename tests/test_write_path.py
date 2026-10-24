@@ -20,12 +20,15 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from custom_components.sharp_cocoro_air import climate as climate_mod
 from custom_components.sharp_cocoro_air import coordinator as coordinator_mod
 from custom_components.sharp_cocoro_air.client import (
+    SharpAPIError,
     SharpAuthError,
     SharpBusy,
     SharpClient,
     SharpError,
+    SharpRefused,
     SharpTerminalRefused,
 )
 from custom_components.sharp_cocoro_air.climate import SharpClimate
@@ -41,6 +44,7 @@ from custom_components.sharp_cocoro_air.coordinator import SharpCoordinator, _ca
 from custom_components.sharp_cocoro_air.protocol import (
     Aircon,
     Capabilities,
+    cmd_mode,
     cmd_setpoint,
     cmd_vanes,
 )
@@ -127,9 +131,19 @@ def _coordinator(hass, cloud: _Cloud, *devices: Aircon) -> SharpCoordinator:
     return coordinator
 
 
-def _status_payload(temp: int, *, box_id: str = "box-1", device_id: int = 1) -> dict:
-    """boxInfo with one B3 setpoint. Enough for the verify read to decode."""
-    raw = bytes([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, 0x01, 0xB3, 0x01, temp])
+def _status_payload(
+    temp: int, *, box_id: str = "box-1", device_id: int = 1, mode: int | None = None
+) -> dict:
+    """boxInfo with a B3 setpoint, and an optional B0 mode."""
+    props: list[tuple[int, bytes]] = []
+    if mode is not None:
+        props.append((0xB0, bytes([mode])))
+    props.append((0xB3, bytes([temp])))
+    raw = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
+    for epc, edt in props:
+        raw.append(epc)
+        raw.append(len(edt))
+        raw.extend(edt)
     return {
         "devices": [
             {
@@ -301,6 +315,94 @@ async def test_stale_poll_keeps_the_pending_target_until_it_matches_or_expires(h
         await coordinator.async_shutdown()
 
 
+async def test_stale_poll_keeps_both_vane_writes(hass, monkeypatch):
+    """Vertical down, then horizontal left, still both show after a stale poll."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_mode("down")
+        await entity.async_set_swing_horizontal_mode("left")
+        cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01)
+        data = await coordinator._async_update_data()
+        current = data[device.unique_key]
+        assert current.vane_vertical == "down"
+        assert current.vane_horizontal == "left"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_each_vane_field_expires_on_its_own(hass, monkeypatch):
+    """A later horizontal write does not keep an older vertical pick on the card or in a frame.
+
+    Home Assistant sets vertical down at t0. At t+10 the Sharp app sets Level
+    and a poll returns byte 02. Horizontal writes at t+25 and t+50 must not
+    extend the vertical deadline: the card shows Level at t+40 and t+65, and
+    the t+50 frame sends vertical 02.
+    """
+    clock = _install_clock(monkeypatch)
+    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    t0 = clock.now
+    try:
+        await entity.async_set_swing_mode("down")
+        first = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        assert first[48] == 0x05
+
+        clock.now = t0 + 10
+        cloud.payload = _fa_payload(vertical=0x02, horizontal=0x01, vanes=True)
+        await coordinator.async_refresh()
+        assert entity.swing_mode == "down"
+
+        clock.now = t0 + 25
+        await entity.async_set_swing_horizontal_mode("left")
+
+        clock.now = t0 + 40
+        await coordinator.async_refresh()
+        assert entity.swing_mode == "level"
+
+        clock.now = t0 + 50
+        await entity.async_set_swing_horizontal_mode("right")
+        last = bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])
+        assert last[48] == 0x02
+        assert last[49] == 0x03
+
+        clock.now = t0 + 65
+        await coordinator.async_refresh()
+        assert entity.swing_mode == "level"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_stale_poll_keeps_a_mode_and_a_later_setpoint(hass, monkeypatch):
+    """A mode change and a later setpoint both survive a poll that shows neither."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _device(setpoint=21.0)
+    coordinator = _coordinator(hass, cloud, device)
+    try:
+        await coordinator.async_send(device.unique_key, cmd_mode("heat"), power=True, mode="heat")
+        await coordinator.async_send(
+            device.unique_key,
+            cmd_setpoint(24, half_degree=False, frame_end=device.frame_end),
+            setpoint=24.0,
+        )
+        cloud.payload = _status_payload(21, mode=0x42)
+        data = await coordinator._async_update_data()
+        current = data[device.unique_key]
+        assert current.mode == "heat"
+        assert current.setpoint == 24.0
+    finally:
+        await coordinator.async_shutdown()
+
+
 async def test_rejected_result_is_not_shown_for_thirty_seconds(hass, monkeypatch):
     """A rejected result does not change the unit. The status read is still scheduled."""
     clock = _install_clock(monkeypatch)
@@ -412,6 +514,7 @@ def _fa_payload(
     b3: int | None = None,
     half: int | None = None,
     half_degree: bool = False,
+    vanes: bool = False,
 ) -> dict:
     """boxInfo with vane bytes, and an optional half-degree setpoint."""
     props: list[tuple[int, bytes]] = []
@@ -423,9 +526,13 @@ def _fa_payload(
     props.append((0xFA, bytes(fa)))
     if b3 is not None:
         props.append((0xB3, bytes([b3])))
-    if half_degree:
+    if half_degree or vanes:
         capabilities = bytearray(32)
-        capabilities[8] = 0x10
+        if half_degree:
+            capabilities[8] = 0x10
+        if vanes:
+            capabilities[10] = 0x01
+            capabilities[11] = 0x02
         props.append((0xF0, bytes(capabilities)))
     body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
     for epc, edt in props:
@@ -531,7 +638,7 @@ async def test_vane_write_sends_both_bytes(hass, monkeypatch):
     device.vane_vertical = "auto"
     device.vane_horizontal = "left"
     device.caps = Capabilities(
-        vertical_vanes=("auto", "up", "horizontal", "down1", "down2", "down", "swing"),
+        vertical_vanes=("auto", "up", "level", "down1", "down2", "down", "swing"),
         horizontal_vanes=("straight", "left", "right", "swing"),
     )
     coordinator = _coordinator(hass, cloud, device)
@@ -572,7 +679,10 @@ async def test_timeout_is_not_resent(hass, monkeypatch):
 
 
 async def test_busy_is_retried_once_after_ten_seconds(hass, monkeypatch):
-    """E1001001 waits 10 s and sends once more. Any other code does not."""
+    """E1001001 waits 10 s and sends once more. Any other code does not retry.
+
+    A failed write still schedules the status refresh.
+    """
     clock = _install_clock(monkeypatch)
     cloud = _Cloud(clock)
     cloud.results = [SharpBusy("E1001001"), "success"]
@@ -590,9 +700,9 @@ async def test_busy_is_retried_once_after_ten_seconds(hass, monkeypatch):
         with pytest.raises(HomeAssistantError, match="rejected the command"):
             await coordinator.async_send(device.unique_key, _B3, setpoint=23.0)
         assert len(cloud.sent) == 1
-        assert coordinator._refresh_unsub is None
+        assert coordinator._refresh_unsub is not None
         await _advance(hass, 20)
-        assert cloud.box_reads == before
+        assert cloud.box_reads == before + 1
     finally:
         await coordinator.async_shutdown()
 
@@ -821,6 +931,122 @@ def _fa_byte(status: list[dict], index: int) -> int:
     return bytes.fromhex(status[0]["valueBinary"]["code"])[index]
 
 
+async def test_homekit_tenths_snap_to_the_half_degree_step(hass, monkeypatch):
+    """21.3 from 20 snaps to 21.5 and sends the whole degree first."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=20.0)
+    device.caps = Capabilities(half_degree=True)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await _flush_temperature(hass, entity, 21.3)
+        assert len(cloud.sent) == 2
+        assert cloud.sent[0][1][0]["statusCode"] == "b3"
+        assert cloud.sent[0][1][0]["valueRange"]["code"] == "21"
+        assert cloud.sent[1][1][0]["statusCode"] == "fa"
+        assert _fa_byte(cloud.sent[1][1], 26) == 43
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_homekit_tenths_that_snap_to_the_current_value_are_not_sent(hass, monkeypatch):
+    """21.2 on a half-degree unit snaps to 21, which is already the setpoint."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    device.caps = Capabilities(half_degree=True)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.2})
+        assert cloud.sent == []
+        assert entity.target_temperature == 21.0
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_setpoint_returns_to_current_inside_the_debounce(hass, monkeypatch):
+    """21→22→21 before the debounce ends stays at 21 and does not send 22."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 22}))
+    try:
+        await asyncio.sleep(0)
+        assert entity.target_temperature == 22
+        second = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 21}))
+        await asyncio.sleep(0)
+        assert entity._pending_target == 21
+        assert entity.target_temperature == 21
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+        await hass.async_block_till_done()
+        assert first.exception() is None
+        assert second.exception() is None
+        assert cloud.sent == []
+        assert entity.target_temperature == 21.0
+        state = hass.states.get(entity.entity_id)
+        assert state is not None
+        assert state.attributes["temperature"] == 21.0
+    finally:
+        if not first.done():
+            first.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_homekit_drag_back_to_the_start_sends_nothing(hass, monkeypatch):
+    """21.3 then 21.2 on a unit at 21 snaps to 21.5, then back to 21, with no send."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    device.caps = Capabilities(half_degree=True)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.3}))
+    try:
+        await asyncio.sleep(0)
+        assert entity._pending_target == 21.5
+        second = hass.async_create_task(entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.2}))
+        await asyncio.sleep(0)
+        assert entity._pending_target == 21.0
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
+        await hass.async_block_till_done()
+        assert first.exception() is None
+        assert second.exception() is None
+        assert cloud.sent == []
+        assert entity.target_temperature == 21.0
+    finally:
+        if not first.done():
+            first.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_homekit_tenths_on_a_whole_degree_unit_snap_before_sending(hass, monkeypatch):
+    """A unit without half degrees snaps 21.4 to 21 (no send) and 21.6 to 22."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device(setpoint=21.0)
+    device.caps = Capabilities(half_degree=False)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_temperature(**{ATTR_TEMPERATURE: 21.4})
+        assert cloud.sent == []
+        await _flush_temperature(hass, entity, 21.6)
+        assert len(cloud.sent) == 1
+        assert cloud.sent[0][1][0]["statusCode"] == "b3"
+        assert cloud.sent[0][1][0]["valueRange"]["code"] == "22"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
 async def test_half_degree_across_a_whole_degree_sends_b3_then_fa(hass, monkeypatch):
     """21 to 22.5 sends the whole degree first, then FA byte 26."""
     _install_clock(monkeypatch)
@@ -900,7 +1126,7 @@ async def test_unsupported_vane_is_rejected_before_a_command(hass, monkeypatch):
     cloud = _Cloud(_Clock())
     device = _device()
     device.caps = Capabilities(
-        vertical_vanes=("auto", "up", "horizontal", "down", "swing"),
+        vertical_vanes=("auto", "up", "level", "down", "swing"),
         horizontal_vanes=("straight", "left", "right", "swing"),
     )
     coordinator = _coordinator(hass, cloud, device)
@@ -941,6 +1167,527 @@ async def test_vertical_auto_without_status_is_not_sent(hass, monkeypatch):
         assert set(raw[16:]) != {0}
     finally:
         await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+_ALL_VERTICAL = ("auto", "up", "level", "down1", "down2", "down", "swing")
+_FOUR_HORIZONTAL = ("straight", "left", "right", "swing")
+_VANE_BYTE = {
+    "auto": 0x00,
+    "up": 0x01,
+    "level": 0x02,
+    "down1": 0x03,
+    "down2": 0x04,
+    "down": 0x05,
+    "swing": 0x07,
+    "straight": 0x01,
+    "left": 0x02,
+    "right": 0x03,
+}
+_VANE_BYTE_SWING_H = 0x0F
+
+
+def _vane_device(
+    *,
+    vertical: str = "up",
+    horizontal: str = "straight",
+    mode: str = "cool",
+    pattern: int = 1,
+) -> Aircon:
+    """A unit with a real FA status frame and the app's vane lists."""
+    frame = bytearray(80)
+    frame[26] = 0x2A
+    frame[48] = _VANE_BYTE[vertical]
+    frame[49] = _VANE_BYTE_SWING_H if horizontal == "swing" else _VANE_BYTE[horizontal]
+    device = _device()
+    device.mode = mode
+    device.vane_vertical = vertical
+    device.vane_horizontal = horizontal
+    device.fa_frame = bytes(frame)
+    device.caps = Capabilities(
+        vertical_pattern=pattern,
+        vertical_vanes=_ALL_VERTICAL,
+        horizontal_vanes=_FOUR_HORIZONTAL,
+    )
+    return device
+
+
+async def _set_vane(entity: SharpClimate, kind: str, value: str) -> None:
+    if kind == "vertical":
+        await entity.async_set_swing_mode(value)
+    else:
+        await entity.async_set_swing_horizontal_mode(value)
+
+
+def _vane_state(entity: SharpClimate, kind: str) -> str | None:
+    if kind == "vertical":
+        return entity.swing_mode
+    return entity.swing_horizontal_mode
+
+
+@pytest.mark.parametrize(
+    ("kind", "current", "pick"),
+    [("vertical", "up", "down"), ("horizontal", "straight", "left")],
+)
+async def test_vane_pick_shows_while_the_call_is_in_flight(hass, monkeypatch, kind, current, pick):
+    """The card shows the pick before the cloud answers, and keeps it after."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.hold = asyncio.Event()
+    device = _vane_device(**{kind: current})
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    task = hass.async_create_task(_set_vane(entity, kind, pick))
+    try:
+        await asyncio.sleep(0)
+        assert _vane_state(entity, kind) == pick
+        state = hass.states.get(entity.entity_id)
+        assert state is not None
+        attribute = "swing_mode" if kind == "vertical" else "swing_horizontal_mode"
+        assert state.attributes[attribute] == pick
+        assert len(cloud.sent) == 1
+        cloud.hold.set()
+        await task
+        assert _vane_state(entity, kind) == pick
+        key = "vane_vertical" if kind == "vertical" else "vane_horizontal"
+        assert key not in entity._pending_vanes
+        assert entity._shown_vanes.get(key) == pick
+        assert entity._shown_until.get(key, 0.0) > 0
+    finally:
+        if not task.done():
+            cloud.hold.set()
+            task.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize("kind", ["vertical", "horizontal"])
+async def test_unmatched_vane_reverts_and_arms_a_refresh(hass, monkeypatch, kind):
+    """A read-back that still shows the old position snaps the card back."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.results = ["unmatch"]
+    cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01)
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    pick = "down" if kind == "vertical" else "left"
+    try:
+        with pytest.raises(HomeAssistantError, match="couldn't be confirmed"):
+            await _set_vane(entity, kind, pick)
+        assert _vane_state(entity, kind) == ("up" if kind == "vertical" else "straight")
+        assert coordinator._refresh_unsub is not None
+        assert len(cloud.sent) == 1
+        assert entity._pending_vanes == {}
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize("kind", ["vertical", "horizontal"])
+async def test_busy_twice_reverts_the_vane_and_arms_a_refresh(hass, monkeypatch, kind):
+    """Two busy answers say the unit is busy, and the card returns to the old position."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.results = [SharpBusy("E1001001"), SharpBusy("E1001002")]
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    pick = "down" if kind == "vertical" else "left"
+    try:
+        with pytest.raises(HomeAssistantError, match="The air conditioner is busy"):
+            await _set_vane(entity, kind, pick)
+        assert _vane_state(entity, kind) == ("up" if kind == "vertical" else "straight")
+        assert coordinator._refresh_unsub is not None
+        assert len(cloud.sent) == 2
+        assert entity._pending_vanes == {}
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize(
+    ("kind", "picks", "index", "last_byte"),
+    [
+        ("vertical", ("down", "level", "swing"), 48, 0x07),
+        ("horizontal", ("left", "right", "swing"), 49, 0x0F),
+    ],
+)
+async def test_three_quick_vane_picks_send_at_most_twice(
+    hass, monkeypatch, kind, picks, index, last_byte
+):
+    """Picks made while one send is in flight collapse. The last frame is the latest pick."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.hold = asyncio.Event()
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(_set_vane(entity, kind, picks[0]))
+    try:
+        await asyncio.sleep(0)
+        assert len(cloud.sent) == 1
+        await _set_vane(entity, kind, picks[1])
+        await _set_vane(entity, kind, picks[2])
+        assert len(cloud.sent) == 1
+        assert _vane_state(entity, kind) == picks[2]
+        cloud.hold.set()
+        await first
+        assert len(cloud.sent) <= 2
+        assert len(cloud.sent) == 2
+        first_raw = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        last_raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
+        assert first_raw[index] == _VANE_BYTE[picks[0]]
+        assert last_raw[index] == last_byte
+        other = 49 if index == 48 else 48
+        assert last_raw[other] == 0x01
+    finally:
+        if not first.done():
+            cloud.hold.set()
+            first.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize(
+    ("kind", "current"),
+    [("vertical", "up"), ("horizontal", "straight")],
+)
+async def test_picking_the_current_vane_sends_nothing(hass, monkeypatch, kind, current):
+    """The unit is already there, so no deviceControl is posted."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await _set_vane(entity, kind, current)
+        assert cloud.sent == []
+        assert _vane_state(entity, kind) == current
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_down1_and_down2_copy_the_other_vane_from_fresh_data(hass, monkeypatch):
+    """03 and 04 go to the vertical byte. The horizontal byte is the fresh status."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _vane_device(horizontal="right")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_mode("down1")
+        raw = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        assert raw[48] == 0x03
+        assert raw[49] == 0x03
+
+        cloud.payload = _fa_payload(vertical=0x03, horizontal=0x02, vanes=True)
+        await coordinator.async_refresh()
+        await entity.async_set_swing_mode("down2")
+        raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
+        assert raw[48] == 0x04
+        assert raw[49] == 0x02
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_later_horizontal_pick_uses_fresh_vertical_status(hass, monkeypatch):
+    """A vertical pick is not repeated after the app has changed that vane."""
+    clock = _install_clock(monkeypatch)
+    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_mode("down")
+        first = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        assert first[48] == 0x05
+        assert entity._pending_vanes == {}
+        clock.now += PENDING_GRACE_S + 1
+        cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01, vanes=True)
+        await coordinator.async_refresh()
+        await entity.async_set_swing_horizontal_mode("left")
+        last = bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])
+        assert last[48] == 0x01
+        assert last[49] == 0x02
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_poll_inside_the_grace_keeps_the_ha_vane_pick(hass, monkeypatch):
+    """A poll that differs within 30 s does not replace the Home Assistant pick.
+
+    A lagging cloud reading and a change made in the Sharp app look the same,
+    so the card keeps the pick until the grace ends. After that, the poll shows.
+    """
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_mode("down")
+        assert entity.swing_mode == "down"
+        cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01)
+        await coordinator.async_refresh()
+        assert coordinator.data[device.unique_key].vane_vertical == "down"
+        assert entity.swing_mode == "down"
+        clock.now += PENDING_GRACE_S
+        await coordinator.async_refresh()
+        assert coordinator.data[device.unique_key].vane_vertical == "up"
+        assert entity.swing_mode == "up"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_horizontal_positions_copy_the_vertical_byte_from_fresh_data(hass, monkeypatch):
+    """Left and swing use bytes 02 and 0F. The vertical byte is read at send time."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _vane_device(vertical="up")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await entity.async_set_swing_horizontal_mode("left")
+        raw = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        assert raw[49] == 0x02
+        assert raw[48] == 0x01
+
+        cloud.payload = _fa_payload(vertical=0x07, horizontal=0x02, vanes=True)
+        await coordinator.async_refresh()
+        await entity.async_set_swing_horizontal_mode("swing")
+        raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
+        assert raw[49] == 0x0F
+        assert raw[48] == 0x07
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_pattern_02_hides_fully_down_in_heat_and_auto(hass, monkeypatch):
+    """a.java hides portrait_down only for pattern 02 while the mode is heat or auto."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _vane_device(mode="heat", pattern=2)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        assert entity.swing_modes == ["auto", "up", "level", "down1", "down2", "swing"]
+        device.mode = "auto"
+        assert entity.swing_modes is not None
+        assert "down" not in entity.swing_modes
+        with pytest.raises(ServiceValidationError):
+            await entity.async_set_swing_mode("down")
+        assert cloud.sent == []
+        device.mode = "cool"
+        assert entity.swing_modes is not None
+        assert "down" in entity.swing_modes
+        device.mode = "heat"
+        device.caps = Capabilities(
+            vertical_pattern=1,
+            vertical_vanes=_ALL_VERTICAL,
+            horizontal_vanes=_FOUR_HORIZONTAL,
+        )
+        assert entity.swing_modes is not None
+        assert "down" in entity.swing_modes
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_pending_vane_expires_after_thirty_seconds(hass, monkeypatch):
+    """A matching pick shows during the grace period. After that, status shows."""
+    device = _vane_device(vertical="swing", horizontal="left")
+    coordinator = _coordinator(hass, _Cloud(_Clock()), device)
+    entity = await _climate(hass, coordinator, device)
+    entity._shown_vanes = {"vane_vertical": "swing", "vane_horizontal": "left"}
+    entity._shown_until = {"vane_vertical": 50.0, "vane_horizontal": 50.0}
+    try:
+        monkeypatch.setattr(climate_mod, "_monotonic", lambda: 49.0)
+        assert entity.swing_mode == "swing"
+        assert entity.swing_horizontal_mode == "left"
+        device.vane_vertical = None
+        device.vane_horizontal = None
+        assert entity.swing_mode == "swing"
+        assert entity.swing_horizontal_mode == "left"
+        monkeypatch.setattr(climate_mod, "_monotonic", lambda: 50.0)
+        assert entity.swing_mode is None
+        assert entity.swing_horizontal_mode is None
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_refused_and_http_errors_name_the_cause_and_refresh(hass, monkeypatch):
+    """A refusal shows its code and an HTTP error shows its status. Both refresh."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        cloud.results = [SharpRefused("E1004001")]
+        with pytest.raises(
+            HomeAssistantError, match=r"Sharp refused the command \(code E1004001\)"
+        ):
+            await entity.async_set_swing_mode("down")
+        assert entity.swing_mode == "up"
+        assert coordinator._refresh_unsub is not None
+
+        coordinator._cancel_refresh()
+        cloud.results = [SharpAPIError(400)]
+        with pytest.raises(HomeAssistantError, match=r"HTTP 400"):
+            await entity.async_set_swing_horizontal_mode("left")
+        assert entity.swing_horizontal_mode == "straight"
+        assert coordinator._refresh_unsub is not None
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize(
+    ("failure", "exc"),
+    [
+        ("http", SharpAPIError(503)),
+        ("busy", SharpBusy("E1001001")),
+        ("refused", SharpRefused("E1004001")),
+    ],
+)
+async def test_read_back_errors_say_the_change_was_not_confirmed(hass, monkeypatch, failure, exc):
+    """An error while reading status back is not a busy, refused, or HTTP message."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.results = ["unmatch"]
+    device = _device()
+    device.vane_vertical = "up"
+    coordinator = _coordinator(hass, cloud, device)
+    status = cmd_vanes(vertical="down", horizontal=None, frame_end=80)
+
+    async def fail_read() -> dict:
+        cloud.box_reads += 1
+        raise exc
+
+    cloud.box_info = fail_read  # type: ignore[method-assign]
+    try:
+        with pytest.raises(HomeAssistantError, match="couldn't be confirmed") as caught:
+            await coordinator.async_send(device.unique_key, status, vane_vertical="down")
+        text = str(caught.value)
+        assert "HTTP" not in text
+        assert "busy" not in text.lower()
+        assert "E100" not in text
+        assert failure
+        assert coordinator._refresh_unsub is not None
+        assert coordinator.data[device.unique_key].vane_vertical == "up"
+        assert len(cloud.sent) == 1
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_failed_vane_send_keeps_the_newer_pick(hass, monkeypatch):
+    """A failed in-flight send does not drop picks whose calls already returned."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    cloud.hold = asyncio.Event()
+    cloud.results = [SharpError("rejected"), "success"]
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    first = hass.async_create_task(_set_vane(entity, "vertical", "down"))
+    try:
+        await asyncio.sleep(0)
+        assert len(cloud.sent) == 1
+        await _set_vane(entity, "vertical", "level")
+        await _set_vane(entity, "vertical", "swing")
+        assert entity.swing_mode == "swing"
+        cloud.hold.set()
+        await first
+        assert len(cloud.sent) == 2
+        first_raw = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        last_raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
+        assert first_raw[48] == 0x05
+        assert last_raw[48] == 0x07
+        assert entity.swing_mode == "swing"
+    finally:
+        if not first.done():
+            cloud.hold.set()
+            first.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_pending_vane_does_not_expire_while_the_send_is_running(hass, monkeypatch):
+    """The 30 s grace starts when the send finishes, not when the user picks."""
+    clock = _install_clock(monkeypatch)
+    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
+    cloud = _Cloud(clock)
+    cloud.hold = asyncio.Event()
+    device = _vane_device()
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    task = hass.async_create_task(entity.async_set_swing_mode("down"))
+    try:
+        await asyncio.sleep(0)
+        assert entity._vane_send_running is True
+        assert entity._shown_until.get("vane_vertical", 0.0) == 0.0
+        assert entity.swing_mode == "down"
+        clock.now += PENDING_GRACE_S + 5
+        assert entity.swing_mode == "down"
+        cloud.hold.set()
+        await task
+        assert entity._vane_send_running is False
+        assert entity._pending_vanes == {}
+        assert entity._shown_vanes.get("vane_vertical") == "down"
+        assert entity._shown_until.get("vane_vertical") == clock.now + PENDING_GRACE_S
+        assert entity.swing_mode == "down"
+        coordinator.data[device.unique_key].vane_vertical = "up"
+        assert entity.swing_mode == "up"
+        clock.now = entity._shown_until["vane_vertical"]
+        assert entity.swing_mode == "up"
+    finally:
+        if not task.done():
+            cloud.hold.set()
+            task.cancel()
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_busy_retry_logs_debug_when_it_succeeds_and_warning_when_it_fails(
+    hass, monkeypatch, caplog
+):
+    """A busy answer that is retried successfully stays at debug. The final failure is a warning."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _device()
+    coordinator = _coordinator(hass, cloud, device)
+    caplog.set_level("DEBUG", logger="custom_components.sharp_cocoro_air.coordinator")
+    try:
+        cloud.results = [SharpBusy("E1001001"), "success"]
+        await coordinator.async_send(device.unique_key, _B3, setpoint=22.0)
+        logged = [
+            (record.levelname, record.getMessage())
+            for record in caplog.records
+            if record.name == "custom_components.sharp_cocoro_air.coordinator"
+        ]
+        assert ("DEBUG", "deviceControl busy, errorCode=E1001001") in logged
+        assert not any(level == "WARNING" for level, _message in logged)
+
+        caplog.clear()
+        cloud.results = [SharpBusy("E1001001"), SharpBusy("E1001002")]
+        with pytest.raises(HomeAssistantError, match="busy"):
+            await coordinator.async_send(device.unique_key, _B3, setpoint=23.0)
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and record.name == "custom_components.sharp_cocoro_air.coordinator"
+        ]
+        assert warnings == ["deviceControl refused, errorCode=E1001002"]
+    finally:
         await coordinator.async_shutdown()
 
 

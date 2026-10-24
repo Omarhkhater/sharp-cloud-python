@@ -49,12 +49,12 @@ _MODE_BY_CODE = {code: name for name, code in MODES}
 _FAN_BY_CODE = {code: name for name, code in FAN_MODES}
 _VANE_V_BY_CODE = {code.upper(): name for name, code in VANE_VERTICAL}
 _VANE_H_BY_CODE = {code.upper(): name for name, code in VANE_HORIZONTAL}
-# F0 byte 10 is the app's vertical pattern (E2.f.y), not a list of position codes.
-# 1 is the five positions these units have. 2 and above add the extra down steps.
-_VERTICAL_BASIC = ("auto", "up", "horizontal", "down", "swing")
+# F0 byte 10 is wind_port (a.java:310-319). 00 hides the block. Any other
+# pattern shows all seven. Pattern 02 hides Fully down in heat and auto;
+# that filter is applied when the climate entity builds its list.
 _VERTICAL_ALL = tuple(name for name, _code in VANE_VERTICAL)
-# F0 byte 11 is the horizontal pattern (E2.f.x). Byte 12 is the fan pattern.
-_HORIZONTAL_NARROW = ("straight", "swing")
+# F0 byte 11 is wind_land. 00 hides the block, 02 leaves four, and any other
+# pattern shows all seven. Byte 12 is the fan pattern, not a vane position.
 _HORIZONTAL_STANDARD = ("straight", "left", "right", "swing")
 _HORIZONTAL_ALL = tuple(name for name, _code in VANE_HORIZONTAL)
 
@@ -316,36 +316,32 @@ class Capabilities:
     a04: bool = False
     rapid: bool = False
     patrol: bool = False
+    # F0 byte 10. 02 hides Fully down while the unit is in heat or auto.
+    vertical_pattern: int = 0
     vertical_vanes: tuple[str, ...] = ()
     horizontal_vanes: tuple[str, ...] = ()
 
 
 def _vertical_from_capability(blob: bytes) -> tuple[str, ...]:
-    """Vertical positions for F0 byte 10, the app's vertical pattern."""
-    if len(blob) <= 10:
+    """Vertical positions for F0 byte 10 (wind_port).
+
+    00 hides the block. Any other pattern, including these units' 01, shows
+    all seven positions.
+    """
+    if len(blob) <= 10 or blob[10] == 0:
         return ()
-    code = blob[10]
-    if code <= 0:
-        return ()
-    if code == 1:
-        return _VERTICAL_BASIC
     return _VERTICAL_ALL
 
 
 def _horizontal_from_capability(blob: bytes) -> tuple[str, ...]:
-    """Horizontal positions for F0 byte 11, the app's horizontal pattern.
+    """Horizontal positions for F0 byte 11 (wind_land).
 
-    Byte 12 is the fan pattern, not a vane position. These units report
-    pattern 2, which is straight, left, right, and swing.
+    00 hides the block. 02 leaves straight, left, right, and swing. Any other
+    pattern shows all seven. Byte 12 is the fan pattern, not a vane position.
     """
-    if len(blob) <= 11:
+    if len(blob) <= 11 or blob[11] == 0:
         return ()
-    code = blob[11]
-    if code <= 0:
-        return ()
-    if code == 1:
-        return _HORIZONTAL_NARROW
-    if code == 2:
+    if blob[11] == 0x02:
         return _HORIZONTAL_STANDARD
     return _HORIZONTAL_ALL
 
@@ -425,6 +421,7 @@ def parse_capabilities(blob: bytes | None) -> Capabilities:
         # report 0x03, so Rapid stays hidden.
         rapid=blob[12] not in (0x02, 0x03),
         patrol=blob[6] == 0x41,
+        vertical_pattern=blob[10],
         vertical_vanes=_vertical_from_capability(blob),
         horizontal_vanes=_horizontal_from_capability(blob),
     )

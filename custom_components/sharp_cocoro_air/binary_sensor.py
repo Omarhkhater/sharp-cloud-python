@@ -93,10 +93,14 @@ class SharpFaultSensor(_UnitBinary):
 
 
 class SharpSuperJetSensor(_UnitBinary):
-    """On when FA byte 50 is 01. The cloud rejected writes of this byte."""
+    """On when FA byte 50 is 01. The cloud rejected writes of this byte.
+
+    Diagnostic so HomeKit Bridge does not expose it as an occupancy sensor.
+    """
 
     translation_suffix = "super_jet"
     _attr_translation_key = "super_jet"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def is_on(self) -> bool | None:

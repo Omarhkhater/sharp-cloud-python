@@ -45,7 +45,7 @@ def test_cocoro_switch_is_config_and_experimental():
 
 
 async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
-    """Vanes and half degrees are on. Soft stays hidden until the option is on."""
+    """Vanes and half degrees are on. Super Jet stays diagnostic, with the same unique id."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         unique_id="user-1",
@@ -100,8 +100,15 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         assert climate.max_temp == 30
         assert ClimateEntityFeature.SWING_MODE in climate.supported_features
         assert ClimateEntityFeature.SWING_HORIZONTAL_MODE in climate.supported_features
-        assert climate.swing_modes is not None
-        assert "down" in climate.swing_modes
+        assert climate.swing_modes == [
+            "auto",
+            "up",
+            "level",
+            "down1",
+            "down2",
+            "down",
+            "swing",
+        ]
         assert climate.swing_horizontal_modes == ["straight", "left", "right", "swing"]
         assert ClimateEntityFeature.FAN_MODE in climate.supported_features
         assert ClimateEntityFeature.TARGET_TEMPERATURE in climate.supported_features
@@ -118,7 +125,8 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
             for entity in hass.data["binary_sensor"].entities
             if entity.unique_id == "1|013001_super_jet"
         )
-        assert super_jet.entity_category is None
+        assert super_jet.unique_id == "1|013001_super_jet"
+        assert super_jet.entity_category is EntityCategory.DIAGNOSTIC
         assert super_jet.entity_registry_enabled_default is True
         assert super_jet.is_on is False
         fault = next(

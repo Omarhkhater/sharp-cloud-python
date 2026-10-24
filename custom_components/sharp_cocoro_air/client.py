@@ -99,6 +99,18 @@ class SharpBusy(SharpError):
         self.code = code
 
 
+class SharpRefused(SharpError):
+    """deviceControl returned an error code that is not a busy code.
+
+    ``code`` is a cloud constant such as E1004001. It is not a device id.
+    """
+
+    def __init__(self, code: str) -> None:
+        """Remember the refusal code. The coordinator shows it to the user."""
+        super().__init__("The air conditioner rejected the command")
+        self.code = code
+
+
 class SharpAPIError(SharpError):
     """The cloud returned an HTTP error."""
 
@@ -516,10 +528,10 @@ class SharpClient:
         error_code = item.get("errorCode")
         if error_code not in (None, "null", ""):
             code = str(error_code)
-            _LOGGER.debug("deviceControl errorCode=%s", code)
             if code in _BUSY_CODES:
                 raise SharpBusy(code)
-            raise SharpError("The air conditioner rejected the command")
+            _LOGGER.warning("deviceControl refused, errorCode=%s", code)
+            raise SharpRefused(code)
         if "id" not in item:
             raise SharpError("The air conditioner did not accept the command")
         return item["id"]

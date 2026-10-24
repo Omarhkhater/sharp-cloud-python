@@ -1,5 +1,22 @@
 {
   "entity": {
+    "climate": {
+      "aircon": {
+        "state_attributes": {
+          "swing_mode": {
+            "state": {
+              "auto": "mdi:autorenew",
+              "up": "mdi:arrow-up-thin",
+              "level": "mdi:arrow-right-thin",
+              "down1": "mdi:arrow-bottom-right-thin",
+              "down2": "mdi:arrow-down-right",
+              "down": "mdi:arrow-down-thin",
+              "swing": "mdi:arrow-up-down"
+            }
+          }
+        }
+      }
+    },
     "sensor": {
       "room_temperature": {"default": "mdi:home-thermometer"},
       "humidity": {"default": "mdi:water-percent"},

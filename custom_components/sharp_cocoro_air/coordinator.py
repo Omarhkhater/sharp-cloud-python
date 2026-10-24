@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -23,11 +24,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .client import (
+    SharpAPIError,
     SharpAuthError,
     SharpBusy,
     SharpClient,
     SharpConnectionError,
     SharpError,
+    SharpRefused,
     SharpTerminalRefused,
 )
 from .const import (
@@ -117,7 +120,10 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         self._poll_lock = asyncio.Lock()
         self._box_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_result_at: dict[str, float] = {}
-        self._pending: dict[str, tuple[dict[str, Any], float]] = {}
+        # Device key, then field name, then (value, deadline). Each field expires alone.
+        self._pending: dict[str, dict[str, tuple[Any, float]]] = {}
+        # Last poll, without optimistic fields. Frames copy every other byte from this.
+        self._fresh: dict[str, Aircon] = {}
         self._last_outdoor: dict[str, tuple[float, float]] = {}
         self._refresh_unsub = None
         self._closed = False
@@ -211,20 +217,50 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             held.append(device)
         return held
 
-    def _overlay_pending(self, data: dict[str, Aircon]) -> None:
-        """Keep a write on screen until the poll shows it or the grace period ends."""
+    def _active_fields(self, key: str, device: Aircon | None) -> dict[str, Any]:
+        """Fields still inside their own deadline and not yet shown by this reading.
+
+        A match or an expiry removes only that field. Another field's deadline
+        is left alone.
+        """
+        fields = self._pending.get(key)
+        if not fields:
+            return {}
         now = _monotonic()
+        active: dict[str, Any] = {}
+        for name in list(fields):
+            value, expires = fields[name]
+            if now >= expires or (device is not None and getattr(device, name) == value):
+                fields.pop(name, None)
+                continue
+            active[name] = value
+        if not fields:
+            self._pending.pop(key, None)
+        return active
+
+    def _device_for_frame(self, key: str) -> Aircon:
+        """Fresh status, plus optimistic values whose own deadlines have not passed."""
+        current = self.data[key]
+        if key not in self._fresh:
+            self._fresh[key] = current
+        base = self._fresh[key]
+        active = self._active_fields(key, base)
+        if not active:
+            return base
+        return with_updates(base, **active)
+
+    def _overlay_pending(self, data: dict[str, Aircon]) -> None:
+        """Keep each unexpired write until a poll shows that field or its deadline passes."""
+        for key, device in data.items():
+            self._fresh[key] = device
         for key in list(self._pending):
-            updates, expires = self._pending[key]
             device = data.get(key)
             if device is None:
-                if now >= expires:
-                    self._pending.pop(key, None)
+                self._active_fields(key, None)
                 continue
-            if now >= expires or _matches(device, updates):
-                self._pending.pop(key, None)
-                continue
-            data[key] = with_updates(device, **updates)
+            active = self._active_fields(key, device)
+            if active:
+                data[key] = with_updates(device, **active)
 
     async def async_send(self, key: str, status: list[dict], **updates: Any) -> None:
         """Send a command for one box, then refresh status outside every lock.
@@ -234,49 +270,116 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         confirmed with one status read and is not sent again. The 15-second
         refresh is never awaited while a lock is held.
         """
+        await self._async_send(key, lambda _device: status, updates, skip_if_applied=False)
+
+    async def async_send_built(
+        self,
+        key: str,
+        build: Callable[[Aircon], list[dict]],
+        **updates: Any,
+    ) -> None:
+        """Build the frame under the box lock from fresh status.
+
+        A command whose fields already match that device is not sent. Only
+        the fields passed in this call are changes. Any other byte comes from
+        the last poll, plus an optimistic value only while that field's own
+        deadline has not passed.
+        """
+        await self._async_send(key, build, updates, skip_if_applied=True)
+
+    async def _async_send(
+        self,
+        key: str,
+        build: Callable[[Aircon], list[dict]],
+        updates: dict[str, Any],
+        *,
+        skip_if_applied: bool,
+    ) -> None:
+        """Send under the box lock. ``build`` runs only after the lock is held."""
         if not self.data or key not in self.data:
             raise HomeAssistantError("That air conditioner is not available")
-        device = self.data[key]
-        box_id = device.box_id
+        box_id = self.data[key].box_id
         confirm_failed = False
+        skipped = False
+        status: list[dict] = []
+        result = "verified"
         try:
             async with self._box_locks[box_id]:
-                try:
-                    await self._wait_settle(box_id)
+                if not self.data or key not in self.data:
+                    raise HomeAssistantError("That air conditioner is not available")
+                device = self._device_for_frame(key)
+                if skip_if_applied and updates and _matches(device, updates):
+                    skipped = True
+                else:
+                    status = build(device)
                     try:
-                        result = await self.client.send_control(device, status)
-                    except SharpBusy:
-                        await _pause(_BUSY_RETRY_S)
-                        result = await self.client.send_control(device, status)
-                    if result == "unmatch" and _is_fa(status):
+                        await self._wait_settle(box_id)
                         try:
-                            result = await self._confirm_fa(device, updates)
-                        except SharpError:
-                            confirm_failed = True
-                            raise
-                    elif result == "unmatch" and _can_retry(status):
-                        result = await self._verify_or_resend(device, status, updates)
-                finally:
-                    self._last_result_at[box_id] = _monotonic()
+                            result = await self.client.send_control(device, status)
+                        except SharpBusy as busy:
+                            await _pause(_BUSY_RETRY_S)
+                            try:
+                                result = await self.client.send_control(device, status)
+                            except SharpBusy as again:
+                                _LOGGER.warning("deviceControl refused, errorCode=%s", again.code)
+                                raise
+                            _LOGGER.debug("deviceControl busy, errorCode=%s", busy.code)
+                        if result == "unmatch" and _is_fa(status):
+                            try:
+                                result = await self._confirm_fa(device, updates)
+                            except SharpError:
+                                confirm_failed = True
+                                raise
+                        elif result == "unmatch" and _can_retry(status):
+                            result = await self._verify_or_resend(device, status, updates)
+                    finally:
+                        self._last_result_at[box_id] = _monotonic()
         except SharpTerminalRefused:
+            if confirm_failed:
+                self._schedule_status_refresh()
+                raise HomeAssistantError(_UNCONFIRMED) from None
             self._set_auth_failures(0)
             self.entry.async_start_reauth(self.hass)
             raise HomeAssistantError(
                 "Sharp sign-in expired. Open the integration and sign in again."
             ) from None
         except SharpAuthError:
-            raise HomeAssistantError("Sharp sign-in expired") from None
-        except SharpConnectionError:
             if confirm_failed:
                 self._schedule_status_refresh()
+                raise HomeAssistantError(_UNCONFIRMED) from None
+            raise HomeAssistantError("Sharp sign-in expired") from None
+        except SharpBusy:
+            self._schedule_status_refresh()
+            if confirm_failed:
+                raise HomeAssistantError(_UNCONFIRMED) from None
+            raise HomeAssistantError(
+                "The air conditioner is busy. Try again in a few seconds."
+            ) from None
+        except SharpRefused as err:
+            self._schedule_status_refresh()
+            if confirm_failed:
+                raise HomeAssistantError(_UNCONFIRMED) from None
+            raise HomeAssistantError(f"Sharp refused the command (code {err.code})") from None
+        except SharpAPIError as err:
+            self._schedule_status_refresh()
+            if confirm_failed:
+                raise HomeAssistantError(_UNCONFIRMED) from None
+            raise HomeAssistantError(
+                f"The Sharp cloud rejected the request (HTTP {err.status})"
+            ) from None
+        except SharpConnectionError:
+            self._schedule_status_refresh()
+            if confirm_failed:
                 raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError("Could not reach the Sharp cloud") from None
         except SharpError:
+            self._schedule_status_refresh()
             if confirm_failed:
-                self._schedule_status_refresh()
                 raise HomeAssistantError(_UNCONFIRMED) from None
             raise HomeAssistantError("The air conditioner rejected the command") from None
 
+        if skipped:
+            return
         if result in ("success", "verified"):
             self._apply_optimistic(key, updates)
         self._schedule_status_refresh()
@@ -328,14 +431,32 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         return "unmatch"
 
     def _apply_optimistic(self, key: str, updates: dict[str, Any]) -> None:
-        """Show the write now, and keep it across a stale poll for a short while."""
+        """Show this write now. Only the fields it changes get a new deadline.
+
+        An earlier field keeps the deadline it already has. A stale poll shows
+        both until each one expires or the poll matches that field.
+        """
         if not updates:
             return
-        self._pending[key] = (dict(updates), _monotonic() + PENDING_GRACE_S)
+        now = _monotonic()
+        fields = self._pending.setdefault(key, {})
+        for name in list(fields):
+            if now >= fields[name][1]:
+                fields.pop(name, None)
+        for name, value in updates.items():
+            fields[name] = (value, now + PENDING_GRACE_S)
         if not self.data or key not in self.data:
+            if not fields:
+                self._pending.pop(key, None)
             return
+        if key not in self._fresh:
+            self._fresh[key] = self.data[key]
+        active = {name: value for name, (value, _expires) in fields.items()}
+        if not fields:
+            self._pending.pop(key, None)
         data = dict(self.data)
-        data[key] = with_updates(self.data[key], **updates)
+        base = self._fresh[key]
+        data[key] = with_updates(base, **active) if active else base
         self.async_set_updated_data(data)
         self._persist_cookies()
 
