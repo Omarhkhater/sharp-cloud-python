@@ -335,6 +335,52 @@ async def test_stale_poll_keeps_both_vane_writes(hass, monkeypatch):
         await coordinator.async_shutdown()
 
 
+async def test_each_vane_field_expires_on_its_own(hass, monkeypatch):
+    """A later horizontal write does not keep an older vertical pick on the card or in a frame.
+
+    Home Assistant sets vertical down at t0. At t+10 the Sharp app sets Level
+    and a poll returns byte 02. Horizontal writes at t+25 and t+50 must not
+    extend the vertical deadline: the card shows Level at t+40 and t+65, and
+    the t+50 frame sends vertical 02.
+    """
+    clock = _install_clock(monkeypatch)
+    monkeypatch.setattr(climate_mod, "_monotonic", clock.monotonic)
+    cloud = _Cloud(clock)
+    device = _vane_device(vertical="up", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    t0 = clock.now
+    try:
+        await entity.async_set_swing_mode("down")
+        first = bytes.fromhex(cloud.sent[0][1][0]["valueBinary"]["code"])
+        assert first[48] == 0x05
+
+        clock.now = t0 + 10
+        cloud.payload = _fa_payload(vertical=0x02, horizontal=0x01, vanes=True)
+        await coordinator.async_refresh()
+        assert entity.swing_mode == "down"
+
+        clock.now = t0 + 25
+        await entity.async_set_swing_horizontal_mode("left")
+
+        clock.now = t0 + 40
+        await coordinator.async_refresh()
+        assert entity.swing_mode == "level"
+
+        clock.now = t0 + 50
+        await entity.async_set_swing_horizontal_mode("right")
+        last = bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])
+        assert last[48] == 0x02
+        assert last[49] == 0x03
+
+        clock.now = t0 + 65
+        await coordinator.async_refresh()
+        assert entity.swing_mode == "level"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
 async def test_stale_poll_keeps_a_mode_and_a_later_setpoint(hass, monkeypatch):
     """A mode change and a later setpoint both survive a poll that shows neither."""
     clock = _install_clock(monkeypatch)
@@ -468,6 +514,7 @@ def _fa_payload(
     b3: int | None = None,
     half: int | None = None,
     half_degree: bool = False,
+    vanes: bool = False,
 ) -> dict:
     """boxInfo with vane bytes, and an optional half-degree setpoint."""
     props: list[tuple[int, bytes]] = []
@@ -479,9 +526,13 @@ def _fa_payload(
     props.append((0xFA, bytes(fa)))
     if b3 is not None:
         props.append((0xB3, bytes([b3])))
-    if half_degree:
+    if half_degree or vanes:
         capabilities = bytearray(32)
-        capabilities[8] = 0x10
+        if half_degree:
+            capabilities[8] = 0x10
+        if vanes:
+            capabilities[10] = 0x01
+            capabilities[11] = 0x02
         props.append((0xF0, bytes(capabilities)))
     body = bytearray([0x01, 0x30, 0x01, 0x05, 0xFF, 0x01, 0x72, len(props)])
     for epc, edt in props:
@@ -1201,7 +1252,7 @@ async def test_vane_pick_shows_while_the_call_is_in_flight(hass, monkeypatch, ki
         key = "vane_vertical" if kind == "vertical" else "vane_horizontal"
         assert key not in entity._pending_vanes
         assert entity._shown_vanes.get(key) == pick
-        assert entity._pending_vanes_until > 0
+        assert entity._shown_until.get(key, 0.0) > 0
     finally:
         if not task.done():
             cloud.hold.set()
@@ -1331,11 +1382,8 @@ async def test_down1_and_down2_copy_the_other_vane_from_fresh_data(hass, monkeyp
         assert raw[48] == 0x03
         assert raw[49] == 0x03
 
-        current = coordinator.data[device.unique_key]
-        frame = bytearray(current.fa_frame or b"")
-        frame[49] = 0x02
-        current.fa_frame = bytes(frame)
-        current.vane_horizontal = "left"
+        cloud.payload = _fa_payload(vertical=0x03, horizontal=0x02, vanes=True)
+        await coordinator.async_refresh()
         await entity.async_set_swing_mode("down2")
         raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
         assert raw[48] == 0x04
@@ -1359,11 +1407,8 @@ async def test_later_horizontal_pick_uses_fresh_vertical_status(hass, monkeypatc
         assert first[48] == 0x05
         assert entity._pending_vanes == {}
         clock.now += PENDING_GRACE_S + 1
-        current = coordinator.data[device.unique_key]
-        frame = bytearray(current.fa_frame or b"")
-        frame[48] = 0x01
-        current.fa_frame = bytes(frame)
-        current.vane_vertical = "up"
+        cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01, vanes=True)
+        await coordinator.async_refresh()
         await entity.async_set_swing_horizontal_mode("left")
         last = bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])
         assert last[48] == 0x01
@@ -1413,11 +1458,8 @@ async def test_horizontal_positions_copy_the_vertical_byte_from_fresh_data(hass,
         assert raw[49] == 0x02
         assert raw[48] == 0x01
 
-        current = coordinator.data[device.unique_key]
-        frame = bytearray(current.fa_frame or b"")
-        frame[48] = 0x07
-        current.fa_frame = bytes(frame)
-        current.vane_vertical = "swing"
+        cloud.payload = _fa_payload(vertical=0x07, horizontal=0x02, vanes=True)
+        await coordinator.async_refresh()
         await entity.async_set_swing_horizontal_mode("swing")
         raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
         assert raw[49] == 0x0F
@@ -1464,7 +1506,7 @@ async def test_pending_vane_expires_after_thirty_seconds(hass, monkeypatch):
     coordinator = _coordinator(hass, _Cloud(_Clock()), device)
     entity = await _climate(hass, coordinator, device)
     entity._shown_vanes = {"vane_vertical": "swing", "vane_horizontal": "left"}
-    entity._pending_vanes_until = 50.0
+    entity._shown_until = {"vane_vertical": 50.0, "vane_horizontal": 50.0}
     try:
         monkeypatch.setattr(climate_mod, "_monotonic", lambda: 49.0)
         assert entity.swing_mode == "swing"
@@ -1591,7 +1633,7 @@ async def test_pending_vane_does_not_expire_while_the_send_is_running(hass, monk
     try:
         await asyncio.sleep(0)
         assert entity._vane_send_running is True
-        assert entity._pending_vanes_until == 0.0
+        assert entity._shown_until.get("vane_vertical", 0.0) == 0.0
         assert entity.swing_mode == "down"
         clock.now += PENDING_GRACE_S + 5
         assert entity.swing_mode == "down"
@@ -1600,11 +1642,11 @@ async def test_pending_vane_does_not_expire_while_the_send_is_running(hass, monk
         assert entity._vane_send_running is False
         assert entity._pending_vanes == {}
         assert entity._shown_vanes.get("vane_vertical") == "down"
-        assert entity._pending_vanes_until == clock.now + PENDING_GRACE_S
+        assert entity._shown_until.get("vane_vertical") == clock.now + PENDING_GRACE_S
         assert entity.swing_mode == "down"
         coordinator.data[device.unique_key].vane_vertical = "up"
         assert entity.swing_mode == "up"
-        clock.now = entity._pending_vanes_until
+        clock.now = entity._shown_until["vane_vertical"]
         assert entity.swing_mode == "up"
     finally:
         if not task.done():

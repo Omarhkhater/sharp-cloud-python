@@ -120,7 +120,10 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         self._poll_lock = asyncio.Lock()
         self._box_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_result_at: dict[str, float] = {}
-        self._pending: dict[str, tuple[dict[str, Any], float]] = {}
+        # Device key, then field name, then (value, deadline). Each field expires alone.
+        self._pending: dict[str, dict[str, tuple[Any, float]]] = {}
+        # Last poll, without optimistic fields. Frames copy every other byte from this.
+        self._fresh: dict[str, Aircon] = {}
         self._last_outdoor: dict[str, tuple[float, float]] = {}
         self._refresh_unsub = None
         self._closed = False
@@ -214,20 +217,50 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             held.append(device)
         return held
 
-    def _overlay_pending(self, data: dict[str, Aircon]) -> None:
-        """Keep every unexpired write until the poll shows all of them."""
+    def _active_fields(self, key: str, device: Aircon | None) -> dict[str, Any]:
+        """Fields still inside their own deadline and not yet shown by this reading.
+
+        A match or an expiry removes only that field. Another field's deadline
+        is left alone.
+        """
+        fields = self._pending.get(key)
+        if not fields:
+            return {}
         now = _monotonic()
+        active: dict[str, Any] = {}
+        for name in list(fields):
+            value, expires = fields[name]
+            if now >= expires or (device is not None and getattr(device, name) == value):
+                fields.pop(name, None)
+                continue
+            active[name] = value
+        if not fields:
+            self._pending.pop(key, None)
+        return active
+
+    def _device_for_frame(self, key: str) -> Aircon:
+        """Fresh status, plus optimistic values whose own deadlines have not passed."""
+        current = self.data[key]
+        if key not in self._fresh:
+            self._fresh[key] = current
+        base = self._fresh[key]
+        active = self._active_fields(key, base)
+        if not active:
+            return base
+        return with_updates(base, **active)
+
+    def _overlay_pending(self, data: dict[str, Aircon]) -> None:
+        """Keep each unexpired write until a poll shows that field or its deadline passes."""
+        for key, device in data.items():
+            self._fresh[key] = device
         for key in list(self._pending):
-            updates, expires = self._pending[key]
             device = data.get(key)
             if device is None:
-                if now >= expires:
-                    self._pending.pop(key, None)
+                self._active_fields(key, None)
                 continue
-            if now >= expires or _matches(device, updates):
-                self._pending.pop(key, None)
-                continue
-            data[key] = with_updates(device, **updates)
+            active = self._active_fields(key, device)
+            if active:
+                data[key] = with_updates(device, **active)
 
     async def async_send(self, key: str, status: list[dict], **updates: Any) -> None:
         """Send a command for one box, then refresh status outside every lock.
@@ -245,12 +278,12 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         build: Callable[[Aircon], list[dict]],
         **updates: Any,
     ) -> None:
-        """Build the frame under the box lock from the current device.
+        """Build the frame under the box lock from fresh status.
 
         A command whose fields already match that device is not sent. Only
-        the fields passed in this call are changes. Any other byte, including
-        the other vane, is copied from that device and is not taken from an
-        earlier pick.
+        the fields passed in this call are changes. Any other byte comes from
+        the last poll, plus an optimistic value only while that field's own
+        deadline has not passed.
         """
         await self._async_send(key, build, updates, skip_if_applied=True)
 
@@ -274,7 +307,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             async with self._box_locks[box_id]:
                 if not self.data or key not in self.data:
                     raise HomeAssistantError("That air conditioner is not available")
-                device = self.data[key]
+                device = self._device_for_frame(key)
                 if skip_if_applied and updates and _matches(device, updates):
                     skipped = True
                 else:
@@ -398,25 +431,32 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         return "unmatch"
 
     def _apply_optimistic(self, key: str, updates: dict[str, Any]) -> None:
-        """Show the write now, and keep it across a stale poll for a short while.
+        """Show this write now. Only the fields it changes get a new deadline.
 
-        A later write inside that window is merged with the earlier one, and
-        the window starts again. A stale poll then still shows both.
+        An earlier field keeps the deadline it already has. A stale poll shows
+        both until each one expires or the poll matches that field.
         """
         if not updates:
             return
         now = _monotonic()
-        merged = dict(updates)
-        previous = self._pending.get(key)
-        if previous is not None:
-            prev_updates, expires = previous
-            if now < expires:
-                merged = {**prev_updates, **updates}
-        self._pending[key] = (merged, now + PENDING_GRACE_S)
+        fields = self._pending.setdefault(key, {})
+        for name in list(fields):
+            if now >= fields[name][1]:
+                fields.pop(name, None)
+        for name, value in updates.items():
+            fields[name] = (value, now + PENDING_GRACE_S)
         if not self.data or key not in self.data:
+            if not fields:
+                self._pending.pop(key, None)
             return
+        if key not in self._fresh:
+            self._fresh[key] = self.data[key]
+        active = {name: value for name, (value, _expires) in fields.items()}
+        if not fields:
+            self._pending.pop(key, None)
         data = dict(self.data)
-        data[key] = with_updates(self.data[key], **merged)
+        base = self._fresh[key]
+        data[key] = with_updates(base, **active) if active else base
         self.async_set_updated_data(data)
         self._persist_cookies()
 

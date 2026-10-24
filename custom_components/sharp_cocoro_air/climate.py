@@ -91,10 +91,9 @@ def _is_half_step(temperature: float) -> bool:
 def _vane_frame(device: Aircon, wanted: dict[str, str]) -> list[dict]:
     """FA frame for the vane this send is changing.
 
-    ``wanted`` holds only that vane. The other vane is copied from ``device``,
-    which the coordinator reads under the write lock, and is not taken from
-    an earlier pick. Copying it leaves the byte as the current status; it is
-    not a separate command.
+    ``wanted`` holds only that vane. The other vane comes from ``device``.
+    The coordinator fills that from fresh status, and from an earlier pick
+    only while that field's own deadline has not passed.
     """
     vertical = wanted.get("vane_vertical")
     if vertical is None:
@@ -175,9 +174,9 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         self._pending_target: float | None = None
         # Unsent vane picks. Cleared when that send succeeds.
         self._pending_vanes: dict[str, str] = {}
-        # Display-only copy of the last successful pick, for the 30 s card grace.
+        # Display-only copy of the last successful pick. Each field has its own deadline.
         self._shown_vanes: dict[str, str] = {}
-        self._pending_vanes_until = 0.0
+        self._shown_until: dict[str, float] = {}
         self._vane_send_running = False
         self._debounce_unsub = None
         self._waiters: list[asyncio.Future[None]] = []
@@ -315,7 +314,7 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         shown = self._shown_vanes.get(key)
         if (
             shown is not None
-            and _monotonic() < self._pending_vanes_until
+            and _monotonic() < self._shown_until.get(key, 0.0)
             and (actual is None or actual == shown)
         ):
             return shown
@@ -508,22 +507,22 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
                     if self._pending_vanes == wanted:
                         for key in wanted:
                             self._shown_vanes.pop(key, None)
+                            self._shown_until.pop(key, None)
                         self._pending_vanes.clear()
-                        self._pending_vanes_until = 0.0
                         self.async_write_ha_state()
                         raise
                     continue
+                now = _monotonic()
                 for key, value in wanted.items():
                     if self._pending_vanes.get(key) == value:
                         self._pending_vanes.pop(key, None)
                         self._shown_vanes[key] = value
+                        self._shown_until[key] = now + PENDING_GRACE_S
                 if not self._pending_vanes:
                     break
         finally:
             self._vane_send_running = False
-        if self._shown_vanes:
-            self._pending_vanes_until = _monotonic() + PENDING_GRACE_S
-            self.async_write_ha_state()
+        self.async_write_ha_state()
 
     async def async_turn_on(self) -> None:
         """Power on without changing the mode."""
