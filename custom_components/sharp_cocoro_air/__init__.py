@@ -44,7 +44,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SharpConfigEntry) -> bo
 
 
 async def _async_reload_options(hass: HomeAssistant, entry: SharpConfigEntry) -> None:
-    """Reload when the experimental toggle changes.
+    """Reload when an option changes.
 
     Cookie writes also update the entry. Those keep the same options, so they
     must not reload.

@@ -14,7 +14,7 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -41,9 +41,9 @@ from .const import (
     OUTDOOR_HOLD_S,
     PENDING_GRACE_S,
     RETRY_EPCS,
-    SCAN_INTERVAL,
     VERIFY_DELAY_S,
     WRITE_SETTLE_S,
+    scan_interval_seconds,
 )
 from .protocol import Aircon, split_box_info, with_updates
 
@@ -104,7 +104,11 @@ def _matches(device: Aircon, updates: dict[str, Any]) -> bool:
 
 
 class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
-    """Fetch every indoor unit about once a minute."""
+    """Fetch every indoor unit on the configured interval.
+
+    The default is 15 seconds. The Sharp cloud does not push status, so this
+    poll is how a change from the remote or the SHARP app can show up.
+    """
 
     def __init__(self, hass: HomeAssistant, entry, client: SharpClient) -> None:
         """Store the account entry and the cloud client."""
@@ -113,17 +117,20 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             _LOGGER,
             config_entry=entry,
             name=DOMAIN,
-            update_interval=SCAN_INTERVAL,
+            update_interval=timedelta(seconds=scan_interval_seconds(entry.options)),
         )
         self.entry = entry
         self.client = client
         self._poll_lock = asyncio.Lock()
         self._box_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_result_at: dict[str, float] = {}
-        # Device key, then field name, then (value, deadline). Each field expires alone.
-        self._pending: dict[str, dict[str, tuple[Any, float]]] = {}
+        # Device key, then field name, then (value, deadline, set_at).
+        # Each field expires alone. set_at is when this write was stored.
+        self._pending: dict[str, dict[str, tuple[Any, float, float]]] = {}
         # Last poll, without optimistic fields. Frames copy every other byte from this.
         self._fresh: dict[str, Aircon] = {}
+        # Set only when a poll is stored. Copying status for a frame does not.
+        self._fresh_at: dict[str, float] = {}
         self._last_outdoor: dict[str, tuple[float, float]] = {}
         self._refresh_unsub = None
         self._closed = False
@@ -229,7 +236,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         now = _monotonic()
         active: dict[str, Any] = {}
         for name in list(fields):
-            value, expires = fields[name]
+            value, expires, _set_at = fields[name]
             if now >= expires or (device is not None and getattr(device, name) == value):
                 fields.pop(name, None)
                 continue
@@ -251,8 +258,10 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
 
     def _overlay_pending(self, data: dict[str, Aircon]) -> None:
         """Keep each unexpired write until a poll shows that field or its deadline passes."""
+        now = _monotonic()
         for key, device in data.items():
             self._fresh[key] = device
+            self._fresh_at[key] = now
         for key in list(self._pending):
             device = data.get(key)
             if device is None:
@@ -261,6 +270,79 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             active = self._active_fields(key, device)
             if active:
                 data[key] = with_updates(device, **active)
+
+    def polled_device(self, key: str) -> Aircon | None:
+        """Status copied for frames, without optimistic fields.
+
+        After a poll this is that poll. Before the first poll it is the status
+        copied when a write built its frame. It is missing until one of those.
+        """
+        return self._fresh.get(key)
+
+    def already_applied(self, key: str, updates: dict[str, Any]) -> bool:
+        """True when this command should not be sent.
+
+        A newer poll that already has every field clears those overlay fields
+        and the card follows the poll. A repeat of our own write is skipped
+        until a newer poll disagrees. Status copied before that write does not
+        count as the unit already being there.
+        """
+        if not updates:
+            return False
+        fresh = self._fresh.get(key)
+        fields = self._pending.get(key) or {}
+        if fresh is not None and _matches(fresh, updates):
+            overlay_differs = any(
+                name in fields and fields[name][0] != value for name, value in updates.items()
+            )
+            stale_snapshot = False
+            if overlay_differs:
+                fresh_at = self._fresh_at.get(key)
+                set_at = max(fields[name][2] for name in updates if name in fields)
+                stale_snapshot = fresh_at is None or fresh_at <= set_at
+            if not stale_snapshot:
+                self._drop_fields(key, set(updates))
+                self._publish_device(key)
+                return True
+        if all(name in fields and fields[name][0] == value for name, value in updates.items()):
+            fresh_at = self._fresh_at.get(key)
+            set_at = max(fields[name][2] for name in updates)
+            contradicted = (
+                fresh is not None
+                and fresh_at is not None
+                and fresh_at > set_at
+                and not _matches(fresh, updates)
+            )
+            if not contradicted:
+                return True
+        return (
+            fresh is None
+            and bool(self.data)
+            and key in self.data
+            and _matches(self.data[key], updates)
+        )
+
+    def _drop_fields(self, key: str, names: set[str]) -> None:
+        """Remove overlay fields. Other fields keep their own deadlines."""
+        fields = self._pending.get(key)
+        if not fields:
+            return
+        for name in names:
+            fields.pop(name, None)
+        if not fields:
+            self._pending.pop(key, None)
+
+    def _publish_device(self, key: str) -> None:
+        """Show the last poll plus any overlay fields that are still active."""
+        if not self.data or key not in self.data:
+            return
+        base = self._fresh.get(key)
+        if base is None:
+            return
+        active = self._active_fields(key, base)
+        data = dict(self.data)
+        data[key] = with_updates(base, **active) if active else base
+        self.async_set_updated_data(data)
 
     async def async_send(self, key: str, status: list[dict], **updates: Any) -> None:
         """Send a command for one box, then refresh status outside every lock.
@@ -280,9 +362,10 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
     ) -> None:
         """Build the frame under the box lock from fresh status.
 
-        A command whose fields already match that device is not sent. Only
-        the fields passed in this call are changes. Any other byte comes from
-        the last poll, plus an optimistic value only while that field's own
+        A command is not sent when the last poll already has those fields, or
+        when it repeats our own write and no newer poll disagrees. Only the
+        fields passed in this call are changes. Any other byte comes from the
+        last poll, plus an optimistic value only while that field's own
         deadline has not passed.
         """
         await self._async_send(key, build, updates, skip_if_applied=True)
@@ -308,7 +391,7 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                 if not self.data or key not in self.data:
                     raise HomeAssistantError("That air conditioner is not available")
                 device = self._device_for_frame(key)
-                if skip_if_applied and updates and _matches(device, updates):
+                if skip_if_applied and self.already_applied(key, updates):
                     skipped = True
                 else:
                     status = build(device)
@@ -444,14 +527,14 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             if now >= fields[name][1]:
                 fields.pop(name, None)
         for name, value in updates.items():
-            fields[name] = (value, now + PENDING_GRACE_S)
+            fields[name] = (value, now + PENDING_GRACE_S, now)
         if not self.data or key not in self.data:
             if not fields:
                 self._pending.pop(key, None)
             return
         if key not in self._fresh:
             self._fresh[key] = self.data[key]
-        active = {name: value for name, (value, _expires) in fields.items()}
+        active = {name: stored[0] for name, stored in fields.items()}
         if not fields:
             self._pending.pop(key, None)
         data = dict(self.data)

@@ -456,7 +456,7 @@ class SharpClient:
     async def pair_unlisted(self, payload: dict) -> None:
         """Pair boxes that lack this terminal, at most once an hour each.
 
-        A rejected or offline box is recorded immediately, so the 60-second
+        A rejected or offline box is recorded immediately, so the status
         poll does not write pairing again until the backoff has passed.
         """
         now = time.monotonic()

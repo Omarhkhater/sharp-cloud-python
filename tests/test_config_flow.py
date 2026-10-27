@@ -40,6 +40,13 @@ def _field_names(schema) -> set[str]:
     return names
 
 
+def _schema_default(schema, name: str):
+    for key in schema.schema:
+        if getattr(key, "schema", key) == name:
+            return key.default()
+    raise AssertionError(name)
+
+
 async def test_user_flow_shows_the_authorize_url_and_stores_the_session(hass):
     """The form has the browser link and no password, then stores cookies."""
     with (
@@ -274,13 +281,38 @@ async def test_options_flow_defaults_experimental_controls_off(hass):
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "init"
-    assert _field_names(result["data_schema"]) == {"experimental_controls"}
+    assert _field_names(result["data_schema"]) == {"experimental_controls", "scan_interval"}
+    assert _schema_default(result["data_schema"], "scan_interval") == 15
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"experimental_controls": True}
+        result["flow_id"], {"experimental_controls": True, "scan_interval": 30}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["experimental_controls"] is True
+    assert entry.options["scan_interval"] == 30
+
+
+async def test_options_flow_keeps_a_saved_scan_interval(hass):
+    """An existing 60 second poll is the form default. An unknown value falls back to 15."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user-1",
+        data={"terminal_app_id": "t", "user_id": "user-1", "cookies": []},
+        options={"experimental_controls": False, "scan_interval": 60},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _schema_default(result["data_schema"], "scan_interval") == 60
+
+    entry2 = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user-2",
+        data={"terminal_app_id": "t", "user_id": "user-2", "cookies": []},
+        options={"scan_interval": 45},
+    )
+    entry2.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry2.entry_id)
+    assert _schema_default(result["data_schema"], "scan_interval") == 15
 
 
 async def test_reauth_succeeds_without_restoring_stale_cookies(hass):

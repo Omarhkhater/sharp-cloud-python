@@ -26,9 +26,12 @@ from .const import (
     CONF_COOKIES,
     CONF_EXPERIMENTAL,
     CONF_REDIRECT_URL,
+    CONF_SCAN_INTERVAL,
     CONF_TERMINAL_APP_ID,
     CONF_USER_ID,
     DOMAIN,
+    SCAN_INTERVAL_OPTIONS,
+    scan_interval_seconds,
 )
 from .coordinator import clear_auth_failures
 from .protocol import authorize_url, extract_auth_code
@@ -122,16 +125,24 @@ class SharpConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class SharpOptionsFlow(OptionsFlow):
-    """One toggle for Soft and Cocoro Air. The option key is unchanged."""
+    """Soft and Cocoro Air, and how often status is read."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Ask whether to show the controls that were not confirmed live."""
+        """Ask about untested controls and the status poll."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
         enabled = bool(self.config_entry.options.get(CONF_EXPERIMENTAL, False))
+        interval = scan_interval_seconds(self.config_entry.options)
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema({vol.Required(CONF_EXPERIMENTAL, default=enabled): bool}),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_EXPERIMENTAL, default=enabled): bool,
+                    vol.Required(CONF_SCAN_INTERVAL, default=interval): vol.In(
+                        list(SCAN_INTERVAL_OPTIONS)
+                    ),
+                }
+            ),
         )
 
 

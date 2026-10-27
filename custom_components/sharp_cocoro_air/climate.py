@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-import time
 from datetime import datetime
 from typing import ClassVar
 
@@ -34,7 +33,6 @@ from .const import (
     MODE_DRY,
     MODE_FAN,
     MODE_HEAT,
-    PENDING_GRACE_S,
     SETPOINT_DEBOUNCE_S,
     TEMP_MAX,
     TEMP_MIN,
@@ -61,11 +59,6 @@ _HVAC = {
     MODE_FAN: HVACMode.FAN_ONLY,
 }
 _MODE = {hvac: mode for mode, hvac in _HVAC.items()}
-
-
-def _monotonic() -> float:
-    """Clock for how long a vane pick stays on the card before it expires."""
-    return time.monotonic()
 
 
 def _known_vane(name: str | None) -> str | None:
@@ -173,10 +166,9 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         )
         self._pending_target: float | None = None
         # Unsent vane picks. Cleared when that send succeeds.
+        # The card uses these only while the send is running. After that,
+        # the coordinator overlay is the only 30 second hold.
         self._pending_vanes: dict[str, str] = {}
-        # Display-only copy of the last successful pick. Each field has its own deadline.
-        self._shown_vanes: dict[str, str] = {}
-        self._shown_until: dict[str, float] = {}
         self._vane_send_running = False
         self._debounce_unsub = None
         self._waiters: list[asyncio.Future[None]] = []
@@ -301,23 +293,15 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         return None if device is None else device.fan
 
     def _shown_vane(self, key: str, actual: str | None) -> str | None:
-        """The pick while its send is in progress, then until a new status arrives.
+        """The pick while its send is in progress. After that, coordinator status.
 
-        The 30 s grace starts when the send ends and only covers a status that
-        still matches the pick, or a missing one. A coordinator value that
-        differs, including a change made in the Sharp app, shows immediately.
+        The coordinator keeps its own 30 second overlay, so the card does not
+        keep a second timer.
         """
         if self._vane_send_running:
             pending = self._pending_vanes.get(key)
             if pending is not None:
                 return pending
-        shown = self._shown_vanes.get(key)
-        if (
-            shown is not None
-            and _monotonic() < self._shown_until.get(key, 0.0)
-            and (actual is None or actual == shown)
-        ):
-            return shown
         return actual
 
     @property
@@ -361,12 +345,11 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
             device = self._device or device
         if target is None:
             return
-        # Ignore a repeat of the current setpoint only when nothing is queued.
-        # 21→22→21 inside the debounce must replace 22, or the flush sends 22.
-        if (
-            self._pending_target is None
-            and device.setpoint is not None
-            and target == device.setpoint
+        # Ignore a repeat only when nothing is queued. 21→22→21 inside the
+        # debounce must replace 22, or the flush sends 22. A newer poll that
+        # disagrees still sends, even when the card is showing that value.
+        if self._pending_target is None and self.coordinator.already_applied(
+            self._key, {"setpoint": target}
         ):
             return
         self._pending_target = target
@@ -391,7 +374,7 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
                 waiters, HomeAssistantError("That air conditioner is not available")
             )
             return
-        if device.setpoint is not None and target == device.setpoint:
+        if self.coordinator.already_applied(self._key, {"setpoint": target}):
             if not self._waiters:
                 self._pending_target = None
             self.async_write_ha_state()
@@ -403,7 +386,14 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         try:
             if half_degree and _is_half_step(target):
                 whole = math.floor(target + 1e-9)
-                current = device.setpoint
+                # The card may still be showing an earlier write. The whole
+                # degree has to follow the last cloud reading, or a half step
+                # is sent alone and the read-back does not match.
+                polled = self.coordinator.polled_device(self._key)
+                if polled is not None and polled.setpoint is not None:
+                    current = polled.setpoint
+                else:
+                    current = device.setpoint
                 crosses = current is None or math.floor(current + 1e-9) != whole
                 if crosses:
                     # The unit keeps the whole degree in B3. Send that first,
@@ -505,19 +495,13 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
                     )
                 except HomeAssistantError:
                     if self._pending_vanes == wanted:
-                        for key in wanted:
-                            self._shown_vanes.pop(key, None)
-                            self._shown_until.pop(key, None)
                         self._pending_vanes.clear()
                         self.async_write_ha_state()
                         raise
                     continue
-                now = _monotonic()
                 for key, value in wanted.items():
                     if self._pending_vanes.get(key) == value:
                         self._pending_vanes.pop(key, None)
-                        self._shown_vanes[key] = value
-                        self._shown_until[key] = now + PENDING_GRACE_S
                 if not self._pending_vanes:
                     break
         finally:

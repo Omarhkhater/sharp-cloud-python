@@ -2,6 +2,16 @@
 
 All notable changes to Sharp Air Egypt are listed here. Versions follow the GitHub releases.
 
+## [0.3.2] - 2026-10-24
+
+### Changed
+- Status is read every 15 seconds by default, instead of every 60. **Configure → Status refresh** can be 10, 15, 30, or 60 seconds. Existing setups use 15 seconds the next time the integration loads. The Sharp cloud does not push a change from the remote or the SHARP app, so this poll is the earliest Home Assistant can show it. The adapter may still upload an infrared change later than that.
+
+### Fixed
+- Choosing the same value again within 30 seconds sends the command when a newer cloud reading disagrees. A repeat before any newer reading still sends nothing. Choosing the value that reading already shows clears the temporary value and sends nothing.
+- A half-degree temperature chosen while Home Assistant is still showing an earlier whole-degree change follows the last cloud reading. The whole degree is sent first when the unit has not reached it yet.
+- The climate card no longer keeps its own 30 second vane timer on top of the coordinator's. The card still shows a vane while that command is being sent.
+
 ## [0.3.1] - 2026-10-24
 
 ### Fixed
@@ -60,6 +70,7 @@ After updating, restart Home Assistant. You don't need to re-add the integration
 - Browser sign-in (no password stored), climate entity, outdoor temperature, power and energy sensors, Plasmacluster switch, fault and Super Jet (read-only) binary sensors.
 - Opt-in experimental controls (airflow, half degrees, Rapid, Sleep/Soft/Speed/Cocoro Air).
 
+[0.3.2]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/Omarhkhater/sharp-cloud-python/releases/tag/v0.2.2

@@ -32,9 +32,10 @@
     "step": {
       "init": {
         "title": "Sharp Air Egypt options",
-        "description": "Soft and Cocoro Air were not confirmed on a live unit. They stay hidden while this is off. Vanes and half-degree temperatures follow each unit and stay available.",
+        "description": "Soft and Cocoro Air were not confirmed on a live unit. They stay hidden while this is off. Vanes and half-degree temperatures follow each unit and stay available.\n\nStatus refresh is how often Home Assistant asks the Sharp cloud for a change made with the remote or the SHARP app. The cloud does not push those changes. 15 seconds is the default.",
         "data": {
-          "experimental_controls": "Show untested controls"
+          "experimental_controls": "Show untested controls",
+          "scan_interval": "Status refresh (seconds)"
         }
       }
     }
