@@ -13,6 +13,11 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.data_entry_flow import AbortFlow, FlowResult
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .client import (
     Account,
@@ -130,16 +135,30 @@ class SharpOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Ask about untested controls and the status poll."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # The dropdown speaks strings. Store the seconds as an int.
+            interval = scan_interval_seconds(
+                {CONF_SCAN_INTERVAL: user_input.get(CONF_SCAN_INTERVAL)}
+            )
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_EXPERIMENTAL: bool(user_input.get(CONF_EXPERIMENTAL, False)),
+                    CONF_SCAN_INTERVAL: interval,
+                },
+            )
         enabled = bool(self.config_entry.options.get(CONF_EXPERIMENTAL, False))
-        interval = scan_interval_seconds(self.config_entry.options)
+        interval = str(scan_interval_seconds(self.config_entry.options))
+        choices = [str(seconds) for seconds in SCAN_INTERVAL_OPTIONS]
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_EXPERIMENTAL, default=enabled): bool,
-                    vol.Required(CONF_SCAN_INTERVAL, default=interval): vol.In(
-                        list(SCAN_INTERVAL_OPTIONS)
+                    vol.Required(CONF_SCAN_INTERVAL, default=interval): SelectSelector(
+                        SelectSelectorConfig(
+                            options=choices,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                 }
             ),

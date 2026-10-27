@@ -685,10 +685,14 @@ def test_package_metadata():
     assert "Enable experimental controls" not in readme
     assert "## [0.3.0] - 2026-10-24" in changelog
     assert "## [0.3.1] - 2026-10-24" in changelog
-    assert "## [0.3.2] - 2026-10-24" in changelog
+    assert "## [0.3.2] - 2026-10-28" in changelog
     assert "every 15 seconds" in readme
     assert "48 hours" in readme
     assert "icon not available" in readme
+    assert "our convention" in readme
+    assert "- · 0" not in readme
+    assert "5171" not in readme
+    assert "5179" not in readme
     assert "Status refresh (seconds)" in strings
     assert "state value changed from `horizontal` to `level`" in changelog
     icons = json.loads((ROOT / "custom_components" / "sharp_cocoro_air" / "icons.json").read_text())

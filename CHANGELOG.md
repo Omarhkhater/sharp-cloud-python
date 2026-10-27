@@ -2,10 +2,11 @@
 
 All notable changes to Sharp Air Egypt are listed here. Versions follow the GitHub releases.
 
-## [0.3.2] - 2026-10-24
+## [0.3.2] - 2026-10-28
 
 ### Changed
 - Status is read every 15 seconds by default, instead of every 60. **Configure → Status refresh** can be 10, 15, 30, or 60 seconds. Existing setups use 15 seconds the next time the integration loads. The Sharp cloud does not push a change from the remote or the SHARP app, so this poll is the earliest Home Assistant can show it. The adapter may still upload an infrared change later than that.
+- A poll that is rate-limited (HTTP 429), gets a server error, or cannot reach the cloud waits 30 seconds, then 60, 120, and 300. A successful poll goes back to the chosen interval. A chosen interval longer than the current wait is kept.
 
 ### Fixed
 - Choosing the same value again within 30 seconds sends the command when a newer cloud reading disagrees. A repeat before any newer reading still sends nothing. Choosing the value that reading already shows clears the temporary value and sends nothing.

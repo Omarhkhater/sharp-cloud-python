@@ -32,7 +32,7 @@ Airflow controls and half-degree temperature steps are on by default. Vertical p
 4. Search for **Sharp Air Egypt** and download it.
 5. Restart Home Assistant.
 
-Requires Home Assistant 2025.1 or newer. The logo appears in **Settings → Devices & services** on Home Assistant 2026.3 and newer. The HACS list can still say the icon is not available.
+Requires Home Assistant 2025.1 or newer. The logo appears in **Settings → Devices & services** on Home Assistant 2026.3 and newer. The HACS list can still say "icon not available".
 
 Manual install: copy `custom_components/sharp_cocoro_air` into your `config/custom_components/` folder and restart.
 
@@ -61,11 +61,9 @@ Tested on the **AY-XP12YHE** and **AY-XP18YHE**. Other Sharp ACs in the Egypt SH
 
 HACS does not hear about a release when it is published. A custom repository you downloaded is checked against GitHub about every 48 hours after HACS starts. Opening the repository, or choosing **Update information** from the ⋮ menu on the Sharp Air Egypt row, checks immediately. Reloading HACS starts that 48-hour wait again. Download the update, then restart Home Assistant. You don't need to re-add the integration.
 
-A release has to be a full GitHub release whose tag is `v` plus the version in `manifest.json`. Drafts are ignored. Prereleases are ignored unless you turned on beta updates in HACS. This repository already publishes that way. Nothing in `hacs.json` makes the check run sooner.
+Releases here are tagged `v` plus the version in `manifest.json`, for example `v0.3.2`. That prefix is our convention. HACS skips drafts, and it skips prereleases unless beta updates are turned on.
 
-A row that reads `- · 0` has no version recorded by HACS, and this repository has 0 GitHub stars. That happens when the files were copied in by hand, or the integration has not been downloaded through HACS yet. Download it once from that row so a later release can show as an update. The time on the row is the last change GitHub recorded, not how long HACS has been waiting.
-
-The grey **icon not available** tile is a HACS limitation. The icon and logo are in `custom_components/sharp_cocoro_air/brand/` and Home Assistant 2026.3 and newer shows them. HACS still asks `brands.home-assistant.io`, which answers with that tile for a custom integration, and the brands repository no longer accepts custom-integration icons. There is nothing further to add here. [HACS 5171](https://github.com/hacs/integration/issues/5171) and [HACS 5179](https://github.com/hacs/integration/issues/5179) track the dashboard.
+The icon and logo are in `custom_components/sharp_cocoro_air/brand/`. Home Assistant 2026.3 and newer shows them under **Settings → Devices & services**. The HACS list can still say "icon not available". That list is replaced by the Marketplace integration in Home Assistant 2026.11, which shows the icon from this repository. Nothing further belongs in a brands submission.
 
 ## Help and issues
 

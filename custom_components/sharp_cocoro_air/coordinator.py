@@ -40,6 +40,7 @@ from .const import (
     FA_VERIFY_S,
     OUTDOOR_HOLD_S,
     PENDING_GRACE_S,
+    POLL_BACKOFF_SECONDS,
     RETRY_EPCS,
     VERIFY_DELAY_S,
     WRITE_SETTLE_S,
@@ -135,6 +136,8 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         self._refresh_unsub = None
         self._closed = False
         self._auth_failures = self._stored_auth_failures()
+        # How many polls in a row hit a rate limit, a server error, or the network.
+        self._poll_failures = 0
         self.tracked_options = dict(entry.options)
         entry.async_on_unload(self._on_unload)
 
@@ -157,6 +160,16 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         """FA-frame controls the user turned on in the options flow."""
         return bool(self.entry.options.get(CONF_EXPERIMENTAL, False))
 
+    def _poll_backoff(self, err: SharpError) -> float | None:
+        """Seconds to wait after a 429, a 5xx, or a network error. Other errors wait as usual."""
+        network = isinstance(err, SharpConnectionError)
+        server = isinstance(err, SharpAPIError) and (err.status == 429 or err.status >= 500)
+        if not network and not server:
+            return None
+        self._poll_failures += 1
+        step = POLL_BACKOFF_SECONDS[min(self._poll_failures - 1, len(POLL_BACKOFF_SECONDS) - 1)]
+        return float(max(step, scan_interval_seconds(self.entry.options)))
+
     async def async_shutdown(self) -> None:
         """Stop the status timer and the poll schedule."""
         self._closed = True
@@ -176,8 +189,12 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                     raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
                 raise UpdateFailed("Sharp sign-in expired") from err
             except SharpError as err:
-                raise UpdateFailed("Could not reach the Sharp cloud") from err
+                delay = self._poll_backoff(err)
+                if delay is None:
+                    raise UpdateFailed("Could not reach the Sharp cloud") from err
+                raise UpdateFailed("Could not reach the Sharp cloud", retry_after=delay) from err
             self._set_auth_failures(0)
+            self._poll_failures = 0
             # One attempt per box per entry load, then at most once an hour.
             await self.client.pair_unlisted(payload)
             _box_ids, devices = split_box_info(payload)

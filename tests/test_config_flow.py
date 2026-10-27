@@ -8,6 +8,7 @@ import pytest_socket
 from aiohttp import web
 from homeassistant.config_entries import SOURCE_REAUTH
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.selector import SelectSelector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.sharp_cocoro_air.client import (
@@ -44,6 +45,13 @@ def _schema_default(schema, name: str):
     for key in schema.schema:
         if getattr(key, "schema", key) == name:
             return key.default()
+    raise AssertionError(name)
+
+
+def _field_selector(schema, name: str):
+    for key, value in schema.schema.items():
+        if getattr(key, "schema", key) == name:
+            return value
     raise AssertionError(name)
 
 
@@ -282,10 +290,13 @@ async def test_options_flow_defaults_experimental_controls_off(hass):
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "init"
     assert _field_names(result["data_schema"]) == {"experimental_controls", "scan_interval"}
-    assert _schema_default(result["data_schema"], "scan_interval") == 15
+    selector = _field_selector(result["data_schema"], "scan_interval")
+    assert isinstance(selector, SelectSelector)
+    assert selector.config["options"] == ["10", "15", "30", "60"]
+    assert _schema_default(result["data_schema"], "scan_interval") == "15"
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"experimental_controls": True, "scan_interval": 30}
+        result["flow_id"], {"experimental_controls": True, "scan_interval": "30"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options["experimental_controls"] is True
@@ -302,7 +313,7 @@ async def test_options_flow_keeps_a_saved_scan_interval(hass):
     )
     entry.add_to_hass(hass)
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert _schema_default(result["data_schema"], "scan_interval") == 60
+    assert _schema_default(result["data_schema"], "scan_interval") == "60"
 
     entry2 = MockConfigEntry(
         domain=DOMAIN,
@@ -312,7 +323,7 @@ async def test_options_flow_keeps_a_saved_scan_interval(hass):
     )
     entry2.add_to_hass(hass)
     result = await hass.config_entries.options.async_init(entry2.entry_id)
-    assert _schema_default(result["data_schema"], "scan_interval") == 15
+    assert _schema_default(result["data_schema"], "scan_interval") == "15"
 
 
 async def test_reauth_succeeds_without_restoring_stale_cookies(hass):
