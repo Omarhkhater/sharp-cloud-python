@@ -6,7 +6,8 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 from homeassistant.components.climate import HVACMode
-from homeassistant.const import UnitOfTemperature
+from homeassistant.components.sensor import SensorDeviceClass
+from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import State
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -122,9 +123,12 @@ async def test_off_unit_keeps_room_temperature_and_humidity(hass, boxinfo):
     }
     assert sensors["2|013001_room_temperature"].native_value == 25
     assert sensors["2|013001_room_temperature"].suggested_display_precision == 0
-    assert sensors["2|013001_humidity"].native_value == 55
+    humidity = sensors["2|013001_humidity"]
+    assert humidity.native_value == 55
+    assert humidity.device_class is SensorDeviceClass.HUMIDITY
+    assert humidity.native_unit_of_measurement == PERCENTAGE
     assert sensors["2|013001_room_temperature"].available is True
-    assert sensors["2|013001_humidity"].available is True
+    assert humidity.available is True
     # The off unit's outdoor byte is 0x7E and there is no earlier reading to hold.
     assert sensors["2|013001_outdoor_temperature"].native_value is None
     assert sensors["2|013001_outdoor_temperature"].available is True

@@ -47,6 +47,10 @@
           "fan_mode": {
             "state": {
               "auto": "Auto",
+              "low": "Quiet",
+              "middle": "Very weak",
+              "medium": "Weak",
+              "high": "Strong",
               "quiet": "Quiet",
               "very_weak": "Very weak",
               "weak": "Weak",
@@ -56,6 +60,8 @@
           },
           "swing_mode": {
             "state": {
+              "on": "On",
+              "off": "Off",
               "auto": "Auto",
               "up": "Up",
               "level": "Level",

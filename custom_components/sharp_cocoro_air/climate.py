@@ -25,7 +25,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from . import SharpConfigEntry
 from .const import (
     DOMAIN,
-    FAN_MODES,
     FAN_RAPID,
     MANUFACTURER,
     MODE_AUTO,
@@ -59,6 +58,31 @@ _HVAC = {
     MODE_FAN: HVACMode.FAN_ONLY,
 }
 _MODE = {hvac: mode for mode, hvac in _HVAC.items()}
+
+# HomeKit Bridge swing on/off. ON is the lowest vertical vane, OFF the highest.
+# The seven position names stay settable. HomeKit reads swing as on only for "on".
+_SWING_FROM_HOMEKIT = {"on": "down", "off": "up"}
+_SWING_TO_HOMEKIT = {"down": "on"}
+
+# HomeKit's rotation slider is low, middle, medium, high, in that order.
+# Auto is a separate toggle. The cloud names stay on the wire.
+_FAN_FROM_HOMEKIT = {
+    "low": "quiet",
+    "middle": "very_weak",
+    "medium": "weak",
+    "high": "strong",
+    "quiet": "quiet",
+    "very_weak": "very_weak",
+    "weak": "weak",
+    "strong": "strong",
+}
+_FAN_TO_HOMEKIT = {
+    "quiet": "low",
+    "very_weak": "middle",
+    "weak": "medium",
+    "strong": "high",
+}
+_HOMEKIT_FAN_MODES = ("auto", "low", "middle", "medium", "high")
 
 
 def _known_vane(name: str | None) -> str | None:
@@ -220,7 +244,7 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         """The same step the capability byte allows."""
         return self.precision
 
-    def _vertical_modes(self, device: Aircon) -> list[str] | None:
+    def _vertical_positions(self, device: Aircon) -> list[str] | None:
         """Vertical positions. Pattern 02 hides Fully down in heat and auto."""
         if not device.caps.vertical_vanes:
             return None
@@ -228,6 +252,18 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         if device.caps.vertical_pattern == 2 and device.mode in {MODE_HEAT, MODE_AUTO}:
             return [mode for mode in modes if mode != "down"]
         return modes
+
+    def _vertical_modes(self, device: Aircon) -> list[str] | None:
+        """Positions, plus HomeKit on/off when those vanes are offered."""
+        positions = self._vertical_positions(device)
+        if positions is None:
+            return None
+        homekit: list[str] = []
+        if "down" in positions:
+            homekit.append("on")
+        if "up" in positions:
+            homekit.append("off")
+        return homekit + positions
 
     @property
     def swing_modes(self) -> list[str] | None:
@@ -279,8 +315,12 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
 
     @property
     def fan_modes(self) -> list[str]:
-        """Fan speeds. Rapid is included only when the capability byte lists it."""
-        modes = [name for name, _code in FAN_MODES if name != FAN_RAPID]
+        """Fan speeds HomeKit can map, plus Rapid when the unit lists it.
+
+        The order is Auto, then low, middle, medium, and high. HomeKit uses
+        that order for the slider and treats auto as its own toggle.
+        """
+        modes = list(_HOMEKIT_FAN_MODES)
         device = self._device
         if device is not None and device.caps.rapid:
             modes.append(FAN_RAPID)
@@ -288,9 +328,11 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
 
     @property
     def fan_mode(self) -> str | None:
-        """Current fan speed."""
+        """Current fan speed, using the HomeKit name when there is one."""
         device = self._device
-        return None if device is None else device.fan
+        if device is None or device.fan is None:
+            return None
+        return _FAN_TO_HOMEKIT.get(device.fan, device.fan)
 
     def _shown_vane(self, key: str, actual: str | None) -> str | None:
         """The pick while its send is in progress. After that, coordinator status.
@@ -306,10 +348,17 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
 
     @property
     def swing_mode(self) -> str | None:
-        """Vertical vane position. A recent pick shows before the cloud answers."""
+        """Vertical vane. Fully down is reported as on so HomeKit reads swing on.
+
+        Every other position, including Up, is not a HomeKit swing-on name, so
+        HomeKit reads swing off. The seven position names remain settable.
+        """
         device = self._device
         actual = None if device is None else device.vane_vertical
-        return self._shown_vane("vane_vertical", actual)
+        shown = self._shown_vane("vane_vertical", actual)
+        if shown is None:
+            return None
+        return _SWING_TO_HOMEKIT.get(shown, shown)
 
     @property
     def swing_horizontal_mode(self) -> str | None:
@@ -447,17 +496,18 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         device = self._device
         if device is None:
             return
-        if fan_mode == FAN_RAPID and not device.caps.rapid:
+        wire = _FAN_FROM_HOMEKIT.get(fan_mode, fan_mode)
+        if wire == FAN_RAPID and not device.caps.rapid:
             raise ServiceValidationError("This air conditioner does not support Rapid")
-        await self.coordinator.async_send(self._key, cmd_fan(fan_mode), fan=fan_mode)
+        await self.coordinator.async_send(self._key, cmd_fan(wire), fan=wire)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
         """Set the vertical vane.
 
-        Only that vane is a change. The horizontal byte is left as the current
-        status and is not sent as its own command.
+        HomeKit on and off are Fully down and Up. Only that vane is a change.
+        The horizontal byte is left as the current status.
         """
-        await self._async_set_vanes(vertical=swing_mode)
+        await self._async_set_vanes(vertical=_SWING_FROM_HOMEKIT.get(swing_mode, swing_mode))
 
     async def async_set_swing_horizontal_mode(self, swing_horizontal_mode: str) -> None:
         """Set the horizontal vane.
@@ -474,7 +524,7 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
         device = self._device
         if device is None:
             return
-        offered = self._vertical_modes(device)
+        offered = self._vertical_positions(device)
         if vertical is not None and (offered is None or vertical not in offered):
             raise ServiceValidationError("This air conditioner does not support that vane position")
         if horizontal is not None and horizontal not in device.caps.horizontal_vanes:

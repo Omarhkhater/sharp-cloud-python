@@ -101,6 +101,8 @@ async def test_experimental_controls_are_off_until_enabled(hass, boxinfo):
         assert ClimateEntityFeature.SWING_MODE in climate.supported_features
         assert ClimateEntityFeature.SWING_HORIZONTAL_MODE in climate.supported_features
         assert climate.swing_modes == [
+            "on",
+            "off",
             "auto",
             "up",
             "level",

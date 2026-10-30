@@ -357,7 +357,7 @@ async def test_each_vane_field_expires_on_its_own(hass, monkeypatch):
         clock.now = t0 + 10
         cloud.payload = _fa_payload(vertical=0x02, horizontal=0x01, vanes=True)
         await coordinator.async_refresh()
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
 
         clock.now = t0 + 25
         await entity.async_set_swing_horizontal_mode("left")
@@ -1322,15 +1322,16 @@ async def test_vane_pick_shows_while_the_call_is_in_flight(hass, monkeypatch, ki
     task = hass.async_create_task(_set_vane(entity, kind, pick))
     try:
         await asyncio.sleep(0)
-        assert _vane_state(entity, kind) == pick
+        shown = "on" if kind == "vertical" and pick == "down" else pick
+        assert _vane_state(entity, kind) == shown
         state = hass.states.get(entity.entity_id)
         assert state is not None
         attribute = "swing_mode" if kind == "vertical" else "swing_horizontal_mode"
-        assert state.attributes[attribute] == pick
+        assert state.attributes[attribute] == shown
         assert len(cloud.sent) == 1
         cloud.hold.set()
         await task
-        assert _vane_state(entity, kind) == pick
+        assert _vane_state(entity, kind) == shown
         key = "vane_vertical" if kind == "vertical" else "vane_horizontal"
         assert key not in entity._pending_vanes
         assert getattr(coordinator.data[device.unique_key], key) == pick
@@ -1510,12 +1511,12 @@ async def test_repick_after_a_newer_poll_sends_the_same_vane_again(hass, monkeyp
         assert len(cloud.sent) == 1
         await entity.async_set_swing_mode("down")
         assert len(cloud.sent) == 1
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
 
         clock.now += 5
         cloud.payload = _fa_payload(vertical=0x02, horizontal=0x01, vanes=True)
         await coordinator.async_refresh()
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         await entity.async_set_swing_mode("down")
         assert len(cloud.sent) == 2
         raw = bytes.fromhex(cloud.sent[1][1][0]["valueBinary"]["code"])
@@ -1537,7 +1538,7 @@ async def test_picking_the_polled_vane_clears_the_overlay(hass, monkeypatch):
         clock.now += 5
         cloud.payload = _fa_payload(vertical=0x02, horizontal=0x01, vanes=True)
         await coordinator.async_refresh()
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         await entity.async_set_swing_mode("level")
         assert len(cloud.sent) == 1
         assert entity.swing_mode == "level"
@@ -1623,11 +1624,11 @@ async def test_poll_inside_the_grace_keeps_the_ha_vane_pick(hass, monkeypatch):
     entity = await _climate(hass, coordinator, device)
     try:
         await entity.async_set_swing_mode("down")
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         cloud.payload = _fa_payload(vertical=0x01, horizontal=0x01)
         await coordinator.async_refresh()
         assert coordinator.data[device.unique_key].vane_vertical == "down"
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         clock.now += PENDING_GRACE_S
         await coordinator.async_refresh()
         assert coordinator.data[device.unique_key].vane_vertical == "up"
@@ -1669,7 +1670,7 @@ async def test_pattern_02_hides_fully_down_in_heat_and_auto(hass, monkeypatch):
     coordinator = _coordinator(hass, cloud, device)
     entity = await _climate(hass, coordinator, device)
     try:
-        assert entity.swing_modes == ["auto", "up", "level", "down1", "down2", "swing"]
+        assert entity.swing_modes == ["off", "auto", "up", "level", "down1", "down2", "swing"]
         device.mode = "auto"
         assert entity.swing_modes is not None
         assert "down" not in entity.swing_modes
@@ -1701,7 +1702,7 @@ async def test_card_follows_coordinator_vane_after_the_send(hass, monkeypatch):
     entity = await _climate(hass, coordinator, device)
     try:
         await entity.async_set_swing_mode("down")
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         coordinator.data[device.unique_key].vane_vertical = "level"
         assert entity.swing_mode == "level"
         clock.now += PENDING_GRACE_S
@@ -1820,14 +1821,14 @@ async def test_pending_vane_does_not_expire_while_the_send_is_running(hass, monk
     try:
         await asyncio.sleep(0)
         assert entity._vane_send_running is True
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         clock.now += PENDING_GRACE_S + 5
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         cloud.hold.set()
         await task
         assert entity._vane_send_running is False
         assert entity._pending_vanes == {}
-        assert entity.swing_mode == "down"
+        assert entity.swing_mode == "on"
         coordinator.data[device.unique_key].vane_vertical = "up"
         assert entity.swing_mode == "up"
     finally:
@@ -1870,6 +1871,94 @@ async def test_busy_retry_logs_debug_when_it_succeeds_and_warning_when_it_fails(
         ]
         assert warnings == ["deviceControl refused, errorCode=E1001002"]
     finally:
+        await coordinator.async_shutdown()
+
+
+# HomeKit Bridge (type_thermostats.py / climate_util.py): swing is on only for
+# on/both/horizontal/vertical, and the fan slider is low, middle, medium, high.
+# Auto is a separate toggle when "auto" is offered alongside those speeds.
+_HK_SWING_ON = {"on", "both", "horizontal", "vertical"}
+_HK_FAN_ORDER = ("low", "middle", "medium", "high")
+_HK_FAN_CODES = {"low": "31", "middle": "33", "medium": "35", "high": "37", "auto": "41"}
+
+
+async def test_homekit_swing_on_is_fully_down_and_other_positions_read_off(hass, monkeypatch):
+    """Swing on sends Fully down. Off sends Up. Any other position is not swing-on."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _vane_device(vertical="level", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        assert entity.swing_modes is not None
+        assert entity.swing_modes[:2] == ["on", "off"]
+        assert entity.swing_modes[2:] == [
+            "auto",
+            "up",
+            "level",
+            "down1",
+            "down2",
+            "down",
+            "swing",
+        ]
+        assert (
+            next(
+                mode
+                for mode in ("on", "both", "horizontal", "vertical")
+                if mode in entity.swing_modes
+            )
+            == "on"
+        )
+        assert "off" in entity.swing_modes
+
+        await entity.async_set_swing_mode("on")
+        assert bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])[48] == 0x05
+        assert entity.swing_mode == "on"
+        assert entity.swing_mode in _HK_SWING_ON
+
+        await entity.async_set_swing_mode("off")
+        assert bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])[48] == 0x01
+        assert entity.swing_mode == "up"
+        assert entity.swing_mode not in _HK_SWING_ON
+
+        for position in ("auto", "level", "down1", "down2", "swing", "down"):
+            await entity.async_set_swing_mode(position)
+            shown = "on" if position == "down" else position
+            assert entity.swing_mode == shown
+            assert (entity.swing_mode in _HK_SWING_ON) is (position == "down")
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_homekit_fan_slider_maps_each_speed_and_auto_is_separate(hass, monkeypatch):
+    """The four speeds are the HomeKit slider, in order. Auto stays its own mode."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _device()
+    device.fan = "quiet"
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        assert entity.fan_modes == ["auto", *_HK_FAN_ORDER]
+        assert entity.fan_mode == "low"
+        ordered = [speed for speed in _HK_FAN_ORDER if speed in entity.fan_modes]
+        assert ordered == list(_HK_FAN_ORDER)
+        assert "auto" in entity.fan_modes
+
+        for mode, code in _HK_FAN_CODES.items():
+            await entity.async_set_fan_mode(mode)
+            assert cloud.sent[-1][1][0]["valueSingle"]["code"] == code
+            assert entity.fan_mode == mode
+
+        await entity.async_set_fan_mode("quiet")
+        assert cloud.sent[-1][1][0]["valueSingle"]["code"] == "31"
+        assert entity.fan_mode == "low"
+        device.fan = "very_weak"
+        coordinator.data[device.unique_key] = device
+        assert entity.fan_mode == "middle"
+    finally:
+        await entity.async_remove()
         await coordinator.async_shutdown()
 
 
