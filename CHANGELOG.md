@@ -2,6 +2,16 @@
 
 All notable changes to Sharp Air Egypt are listed here. Versions follow the GitHub releases.
 
+## [0.4.0] - 2026-10-30
+
+### Added
+- HomeKit Bridge swing: on is Fully down and off is Up. Any other vertical position, including Up, shows as off. All seven positions stay selectable. `down` still sets Fully down. While the vane is Fully down, the state is `on`.
+- HomeKit Bridge fan: the speed slider is `low`, `middle`, `medium`, and `high` (Quiet, Very weak, Weak, and Strong), in that order. Auto is the separate auto toggle. `quiet`, `very_weak`, `weak`, and `strong` are still in the fan list and set the same speeds. Rapid stays available in Home Assistant when the unit lists it.
+- Humidity stays on the climate entity and on the humidity sensor while the air conditioner is off, so HomeKit Bridge can show it.
+
+### Changed
+- Fan state values are now `low`, `middle`, `medium`, and `high` instead of `quiet`, `very_weak`, `weak`, and `strong`. The Fully down vane state is `on` instead of `down`. Check templates and automations that match `fan_mode` or `swing_mode`. An existing HomeKit bridge needs a restart, and may need Reset accessory, before the swing toggle and fan slider appear.
+
 ## [0.3.2] - 2026-10-30
 
 ### Changed
@@ -71,6 +81,7 @@ After updating, restart Home Assistant. You don't need to re-add the integration
 - Browser sign-in (no password stored), climate entity, outdoor temperature, power and energy sensors, Plasmacluster switch, fault and Super Jet (read-only) binary sensors.
 - Opt-in experimental controls (airflow, half degrees, Rapid, Sleep/Soft/Speed/Cocoro Air).
 
+[0.4.0]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Omarhkhater/sharp-cloud-python/compare/v0.2.2...v0.3.0
