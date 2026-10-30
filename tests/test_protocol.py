@@ -657,7 +657,7 @@ def test_package_metadata():
     ).read_text()
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["config_flow"] is True
-    assert manifest["version"] == "0.3.1"
+    assert manifest["version"] == "0.3.2"
     assert manifest["name"] == "Sharp Air Egypt"
     assert manifest["domain"] == "sharp_cocoro_air"
     assert manifest["documentation"] == "https://github.com/Omarhkhater/sharp-cloud-python"
@@ -676,7 +676,7 @@ def test_package_metadata():
     assert "https://github.com/Omarhkhater/sharp-cloud-python" in readme
     assert "sharp-air-egypt-ha" not in readme
     assert "sharp-air-egypt-ha" not in changelog
-    assert 'version = "0.3.1"' in (ROOT / "pyproject.toml").read_text()
+    assert 'version = "0.3.2"' in (ROOT / "pyproject.toml").read_text()
     assert (
         "Vertical positions are Auto, Up, Level, Slightly down, Further down, Fully down, and Swing."
         in readme
@@ -685,6 +685,15 @@ def test_package_metadata():
     assert "Enable experimental controls" not in readme
     assert "## [0.3.0] - 2026-10-24" in changelog
     assert "## [0.3.1] - 2026-10-24" in changelog
+    assert "## [0.3.2] - 2026-10-30" in changelog
+    assert "every 15 seconds" in readme
+    assert "48 hours" in readme
+    assert "icon not available" in readme
+    assert "our convention" in readme
+    assert "- · 0" not in readme
+    assert "5171" not in readme
+    assert "5179" not in readme
+    assert "Status refresh (seconds)" in strings
     assert "state value changed from `horizontal` to `level`" in changelog
     icons = json.loads((ROOT / "custom_components" / "sharp_cocoro_air" / "icons.json").read_text())
     vane_icons = icons["entity"]["climate"]["aircon"]["state_attributes"]["swing_mode"]["state"]

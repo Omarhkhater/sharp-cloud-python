@@ -21,7 +21,7 @@ from custom_components.sharp_cocoro_air.client import (
     SharpConnectionError,
     SharpTerminalRefused,
 )
-from custom_components.sharp_cocoro_air.const import DOMAIN
+from custom_components.sharp_cocoro_air.const import CONF_SCAN_INTERVAL, DOMAIN
 from custom_components.sharp_cocoro_air.coordinator import (
     _AUTH_FAILURES,
     SharpCoordinator,
@@ -345,6 +345,98 @@ async def test_failed_fa_read_back_still_schedules_a_refresh(hass, monkeypatch):
             await coordinator.async_send(device.unique_key, _FA, vane_vertical="swing")
         assert coordinator._refresh_unsub is not None
         assert len(cloud.sent) == 1
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_rate_limit_server_and_network_errors_back_off(hass):
+    """403, 429, 5xx, and a network error wait longer. A later success starts the wait over."""
+    for exc in (
+        SharpAPIError(403),
+        SharpAPIError(429),
+        SharpAPIError(500),
+        SharpAPIError(503),
+        SharpConnectionError("Could not reach the Sharp cloud"),
+    ):
+        cloud = _AuthCloud(exc)
+        coordinator = _auth_coordinator(hass, cloud)
+        try:
+            delays = []
+            for _attempt in range(5):
+                with pytest.raises(UpdateFailed) as caught:
+                    await coordinator._async_update_data()
+                delays.append(caught.value.retry_after)
+            assert delays == [30.0, 60.0, 120.0, 300.0, 300.0]
+            assert coordinator.update_interval == timedelta(seconds=15)
+            assert coordinator._auth_failures == 0
+            cloud.exc = None
+            await coordinator._async_update_data()
+            cloud.exc = exc
+            with pytest.raises(UpdateFailed) as caught:
+                await coordinator._async_update_data()
+            assert caught.value.retry_after == 30.0
+        finally:
+            await coordinator.async_shutdown()
+
+
+async def test_old_home_assistant_stretches_the_poll_interval(hass, monkeypatch):
+    """Before 2025.11.2, UpdateFailed rejects retry_after, so the interval itself grows."""
+
+    class _LegacyUpdateFailed(Exception):
+        def __init__(self, message: str = "", **kwargs: object) -> None:
+            if kwargs:
+                raise TypeError("UpdateFailed() takes no keyword arguments")
+            super().__init__(message)
+            self.retry_after = None
+
+    monkeypatch.setattr(
+        "custom_components.sharp_cocoro_air.coordinator.UpdateFailed",
+        _LegacyUpdateFailed,
+    )
+    cloud = _AuthCloud(SharpAPIError(429))
+    coordinator = _auth_coordinator(hass, cloud)
+    try:
+        waits = []
+        for _attempt in range(5):
+            with pytest.raises(_LegacyUpdateFailed) as caught:
+                await coordinator._async_update_data()
+            assert caught.value.retry_after is None
+            waits.append(coordinator.update_interval)
+        assert waits == [timedelta(seconds=seconds) for seconds in (30, 60, 120, 300, 300)]
+        cloud.exc = None
+        await coordinator._async_update_data()
+        assert coordinator.update_interval == timedelta(seconds=15)
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_other_poll_errors_do_not_back_off(hass):
+    """A 400 and a sign-in failure keep the normal poll. They do not stretch the wait."""
+    for exc in (SharpAPIError(400), SharpAuthError("Sharp sign-in expired")):
+        cloud = _AuthCloud(exc)
+        coordinator = _auth_coordinator(hass, cloud)
+        try:
+            with pytest.raises(UpdateFailed) as caught:
+                await coordinator._async_update_data()
+            assert caught.value.retry_after is None
+            assert coordinator._poll_failures == 0
+        finally:
+            await coordinator.async_shutdown()
+
+
+async def test_backoff_does_not_poll_faster_than_the_chosen_interval(hass):
+    """A 60 second poll stays at 60 on the first failure, then follows the longer steps."""
+    cloud = _AuthCloud(SharpAPIError(429))
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={CONF_SCAN_INTERVAL: 60})
+    entry.add_to_hass(hass)
+    coordinator = SharpCoordinator(hass, entry, cloud)  # type: ignore[arg-type]
+    try:
+        delays = []
+        for _attempt in range(4):
+            with pytest.raises(UpdateFailed) as caught:
+                await coordinator._async_update_data()
+            delays.append(caught.value.retry_after)
+        assert delays == [60.0, 60.0, 120.0, 300.0]
     finally:
         await coordinator.async_shutdown()
 

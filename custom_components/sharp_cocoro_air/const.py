@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import timedelta
+from typing import Any
 
 DOMAIN = "sharp_cocoro_air"
 
@@ -26,8 +28,16 @@ B2C_CLIENT_ID = "66e7f408-b1bf-46a8-b467-32204ab52f93"
 B2C_REDIRECT = "https://sharp-cocoroair-egypt"
 B2C_SCOPE = "openid offline_access"
 
-SCAN_INTERVAL = timedelta(seconds=60)
-# A box that rejects pairing is not tried again on the 60-second poll.
+# The cloud does not push infrared or app changes. 15 seconds is one
+# boxInfo read for the whole account. 10, 30, and 60 stay available.
+DEFAULT_SCAN_INTERVAL = 15
+SCAN_INTERVAL_OPTIONS: tuple[int, ...] = (10, 15, 30, 60)
+SCAN_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+CONF_SCAN_INTERVAL = "scan_interval"
+# A 403, a 429, a 5xx, or a network error waits at least this long, then longer.
+# The last step repeats. A successful poll returns to the chosen interval.
+POLL_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120, 300)
+# A box that rejects pairing is not tried again on the status poll.
 PAIR_BACKOFF_SECONDS = 60 * 60
 # The outdoor coil is not measured while the indoor unit is off (BE = 0x7E).
 # Keep the last reading this long, then let the sensor go unknown.
@@ -58,6 +68,21 @@ CONF_USER_ID = "user_id"
 # Same option key as before. Soft and Cocoro Air stay behind it.
 # Vanes and half degrees follow the unit's capability bytes instead.
 CONF_EXPERIMENTAL = "experimental_controls"
+
+
+def scan_interval_seconds(options: Mapping[str, Any] | None) -> int:
+    """Poll period in seconds. A missing or unknown value is 15."""
+    if not options:
+        return DEFAULT_SCAN_INTERVAL
+    raw = options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_SCAN_INTERVAL
+    if value not in SCAN_INTERVAL_OPTIONS:
+        return DEFAULT_SCAN_INTERVAL
+    return value
+
 
 # ECHONET operation-mode codes (EPC B0).
 MODE_AUTO = "auto"

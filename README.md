@@ -32,7 +32,7 @@ Airflow controls and half-degree temperature steps are on by default. Vertical p
 4. Search for **Sharp Air Egypt** and download it.
 5. Restart Home Assistant.
 
-Requires Home Assistant 2025.1 or newer. The logo appears on Home Assistant 2026.3 and newer.
+Requires Home Assistant 2025.1 or newer. The logo appears in **Settings → Devices & services** on Home Assistant 2026.3 and newer. The HACS list can still say "icon not available".
 
 Manual install: copy `custom_components/sharp_cocoro_air` into your `config/custom_components/` folder and restart.
 
@@ -51,11 +51,19 @@ Tested on the **AY-XP12YHE** and **AY-XP18YHE**. Other Sharp ACs in the Egypt SH
 
 ## Limitations
 
-- **Cloud only.** It works through Sharp's Egypt cloud (polled about every minute) and needs an internet connection. There's no local control.
+- **Cloud only.** It works through Sharp's Egypt cloud and needs an internet connection. There's no local control. Home Assistant asks for status every 15 seconds by default. Configure → Status refresh can be 10, 15, 30, or 60 seconds. The cloud does not push a change from the infrared remote or the SHARP app. The adapter uploads that change when it can, and that wait is on Sharp's side. It is not measured here.
 - **Super Jet is read-only.** Use the remote to switch it.
 - **No Sharp timers.** Use Home Assistant automations or schedules instead.
 - **Room readings freeze while the AC is off.** Sharp's cloud caches room temperature and humidity until the unit is turned back on.
 - **Unofficial project.** It isn't affiliated with or endorsed by Sharp Corporation or El Araby Group.
+
+## Updates in HACS
+
+HACS does not hear about a release when it is published. A custom repository you downloaded is checked against GitHub about every 48 hours after HACS starts. Opening the repository, or choosing **Update information** from the ⋮ menu on the Sharp Air Egypt row, checks immediately. Reloading HACS starts that 48-hour wait again. Download the update, then restart Home Assistant. You don't need to re-add the integration.
+
+Releases here are tagged `v` plus the version in `manifest.json`, for example `v0.3.2`. That prefix is our convention. HACS skips drafts, and it skips prereleases unless beta updates are turned on.
+
+The icon and logo are in `custom_components/sharp_cocoro_air/brand/`. Home Assistant 2026.3 and newer shows them under **Settings → Devices & services**. The HACS list can still say "icon not available". That list is replaced by the Marketplace integration in Home Assistant 2026.11, which shows the icon from this repository. Nothing further belongs in a brands submission.
 
 ## Help and issues
 
