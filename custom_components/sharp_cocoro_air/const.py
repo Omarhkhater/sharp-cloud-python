@@ -34,7 +34,7 @@ DEFAULT_SCAN_INTERVAL = 15
 SCAN_INTERVAL_OPTIONS: tuple[int, ...] = (10, 15, 30, 60)
 SCAN_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL)
 CONF_SCAN_INTERVAL = "scan_interval"
-# A 429, a 5xx, or a network error waits at least this long, then longer.
+# A 403, a 429, a 5xx, or a network error waits at least this long, then longer.
 # The last step repeats. A successful poll returns to the chosen interval.
 POLL_BACKOFF_SECONDS: tuple[int, ...] = (30, 60, 120, 300)
 # A box that rejects pairing is not tried again on the status poll.

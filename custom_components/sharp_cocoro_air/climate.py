@@ -395,9 +395,13 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
                 else:
                     current = device.setpoint
                 crosses = current is None or math.floor(current + 1e-9) != whole
-                if crosses:
+                if crosses and not self.coordinator.already_applied(
+                    self._key, {"setpoint": float(whole)}
+                ):
                     # The unit keeps the whole degree in B3. Send that first,
                     # then the half-degree byte, or a lagging FA byte is wrong.
+                    # Skip it when this same whole degree was just sent and no
+                    # newer reading disagrees.
                     await self.coordinator.async_send(
                         self._key,
                         cmd_setpoint(float(whole), half_degree=True, frame_end=device.frame_end),

@@ -1084,8 +1084,8 @@ async def test_half_degree_down_to_a_whole_degree_is_only_b3(hass, monkeypatch):
         await coordinator.async_shutdown()
 
 
-async def test_half_degree_after_a_held_whole_degree_sends_b3_first(hass, monkeypatch):
-    """21, then 22, then 22.5 sends B3 22 again because the cloud reading is still 21."""
+async def test_half_degree_after_a_held_whole_degree_does_not_repeat_b3(hass, monkeypatch):
+    """21, then 22, then 22.5 sends the half step only. The whole degree was just sent."""
     _install_clock(monkeypatch)
     cloud = _Cloud(_Clock())
     device = _device(setpoint=21.0)
@@ -1097,12 +1097,72 @@ async def test_half_degree_after_a_held_whole_degree_sends_b3_first(hass, monkey
         assert len(cloud.sent) == 1
         assert cloud.sent[0][1][0]["valueRange"]["code"] == "22"
         await _flush_temperature(hass, entity, 22.5)
+        assert len(cloud.sent) == 2
+        assert cloud.sent[1][1][0]["statusCode"] == "fa"
+        assert _fa_byte(cloud.sent[1][1], 26) == 45
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_half_degree_repeats_b3_when_a_newer_poll_is_still_behind(hass, monkeypatch):
+    """22.5 sends B3 again when a newer reading still shows the old whole degree."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _device(setpoint=21.0)
+    device.caps = Capabilities(half_degree=True)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        await _flush_temperature(hass, entity, 22)
+        clock.now += 5
+        cloud.payload = _fa_payload(b3=21, half=0x2A, half_degree=True)
+        await coordinator.async_refresh()
+        assert entity.target_temperature == 22
+        await _flush_temperature(hass, entity, 22.5)
         assert len(cloud.sent) == 3
         assert cloud.sent[1][1][0]["statusCode"] == "b3"
         assert cloud.sent[1][1][0]["valueRange"]["code"] == "22"
         assert cloud.sent[2][1][0]["statusCode"] == "fa"
         assert _fa_byte(cloud.sent[2][1], 26) == 45
     finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_poll_started_before_a_write_does_not_swallow_the_revert(hass, monkeypatch):
+    """A read already in flight is not a newer reading, so picking the old value sends it."""
+    clock = _install_clock(monkeypatch)
+    cloud = _Cloud(clock)
+    device = _device(setpoint=21.0)
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_read() -> dict:
+        entered.set()
+        await release.wait()
+        return _status_payload(21)
+
+    cloud.box_info = slow_read  # type: ignore[method-assign]
+    poll = hass.async_create_task(coordinator.async_refresh())
+    try:
+        await entered.wait()
+        await coordinator.async_send(device.unique_key, _B3, setpoint=22.0)
+        set_at = coordinator._pending[device.unique_key]["setpoint"][2]
+        clock.now += 0.3
+        release.set()
+        await poll
+        assert coordinator._fresh_at[device.unique_key] == set_at
+        assert entity.target_temperature == 22
+        await _flush_temperature(hass, entity, 21)
+        assert len(cloud.sent) == 2
+        assert cloud.sent[1][1][0]["valueRange"]["code"] == "21"
+    finally:
+        if not poll.done():
+            release.set()
+            poll.cancel()
         await entity.async_remove()
         await coordinator.async_shutdown()
 

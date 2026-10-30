@@ -350,8 +350,9 @@ async def test_failed_fa_read_back_still_schedules_a_refresh(hass, monkeypatch):
 
 
 async def test_rate_limit_server_and_network_errors_back_off(hass):
-    """429, 5xx, and a network error wait longer. A later success starts the wait over."""
+    """403, 429, 5xx, and a network error wait longer. A later success starts the wait over."""
     for exc in (
+        SharpAPIError(403),
         SharpAPIError(429),
         SharpAPIError(500),
         SharpAPIError(503),
@@ -366,6 +367,7 @@ async def test_rate_limit_server_and_network_errors_back_off(hass):
                     await coordinator._async_update_data()
                 delays.append(caught.value.retry_after)
             assert delays == [30.0, 60.0, 120.0, 300.0, 300.0]
+            assert coordinator.update_interval == timedelta(seconds=15)
             assert coordinator._auth_failures == 0
             cloud.exc = None
             await coordinator._async_update_data()
@@ -375,6 +377,37 @@ async def test_rate_limit_server_and_network_errors_back_off(hass):
             assert caught.value.retry_after == 30.0
         finally:
             await coordinator.async_shutdown()
+
+
+async def test_old_home_assistant_stretches_the_poll_interval(hass, monkeypatch):
+    """Before 2025.11.2, UpdateFailed rejects retry_after, so the interval itself grows."""
+
+    class _LegacyUpdateFailed(Exception):
+        def __init__(self, message: str = "", **kwargs: object) -> None:
+            if kwargs:
+                raise TypeError("UpdateFailed() takes no keyword arguments")
+            super().__init__(message)
+            self.retry_after = None
+
+    monkeypatch.setattr(
+        "custom_components.sharp_cocoro_air.coordinator.UpdateFailed",
+        _LegacyUpdateFailed,
+    )
+    cloud = _AuthCloud(SharpAPIError(429))
+    coordinator = _auth_coordinator(hass, cloud)
+    try:
+        waits = []
+        for _attempt in range(5):
+            with pytest.raises(_LegacyUpdateFailed) as caught:
+                await coordinator._async_update_data()
+            assert caught.value.retry_after is None
+            waits.append(coordinator.update_interval)
+        assert waits == [timedelta(seconds=seconds) for seconds in (30, 60, 120, 300, 300)]
+        cloud.exc = None
+        await coordinator._async_update_data()
+        assert coordinator.update_interval == timedelta(seconds=15)
+    finally:
+        await coordinator.async_shutdown()
 
 
 async def test_other_poll_errors_do_not_back_off(hass):

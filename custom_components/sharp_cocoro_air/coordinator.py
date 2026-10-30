@@ -161,14 +161,29 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
         return bool(self.entry.options.get(CONF_EXPERIMENTAL, False))
 
     def _poll_backoff(self, err: SharpError) -> float | None:
-        """Seconds to wait after a 429, a 5xx, or a network error. Other errors wait as usual."""
+        """Seconds to wait after 403, 429, 5xx, or a network error. Other errors wait as usual."""
         network = isinstance(err, SharpConnectionError)
-        server = isinstance(err, SharpAPIError) and (err.status == 429 or err.status >= 500)
-        if not network and not server:
+        limited = isinstance(err, SharpAPIError) and (err.status in (403, 429) or err.status >= 500)
+        if not network and not limited:
             return None
         self._poll_failures += 1
         step = POLL_BACKOFF_SECONDS[min(self._poll_failures - 1, len(POLL_BACKOFF_SECONDS) - 1)]
         return float(max(step, scan_interval_seconds(self.entry.options)))
+
+    def _raise_poll_failure(self, delay: float | None, err: SharpError) -> None:
+        """Fail the poll. Newer Home Assistant delays the next one with retry_after.
+
+        ``retry_after`` exists since Home Assistant 2025.11.2. Older versions
+        raise TypeError, so the chosen poll interval is stretched instead.
+        """
+        message = "Could not reach the Sharp cloud"
+        if delay is None:
+            raise UpdateFailed(message) from err
+        try:
+            raise UpdateFailed(message, retry_after=delay) from err
+        except TypeError:
+            self.update_interval = timedelta(seconds=delay)
+            raise UpdateFailed(message) from err
 
     async def async_shutdown(self) -> None:
         """Stop the status timer and the poll schedule."""
@@ -178,6 +193,8 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
 
     async def _async_update_data(self) -> dict[str, Aircon]:
         async with self._poll_lock:
+            # A read that started before a write must not look newer than that write.
+            started = _monotonic()
             try:
                 payload = await self.client.box_info()
             except SharpAuthError as err:
@@ -189,19 +206,17 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
                     raise ConfigEntryAuthFailed("Sharp sign-in expired") from err
                 raise UpdateFailed("Sharp sign-in expired") from err
             except SharpError as err:
-                delay = self._poll_backoff(err)
-                if delay is None:
-                    raise UpdateFailed("Could not reach the Sharp cloud") from err
-                raise UpdateFailed("Could not reach the Sharp cloud", retry_after=delay) from err
+                self._raise_poll_failure(self._poll_backoff(err), err)
             self._set_auth_failures(0)
             self._poll_failures = 0
+            self.update_interval = timedelta(seconds=scan_interval_seconds(self.entry.options))
             # One attempt per box per entry load, then at most once an hour.
             await self.client.pair_unlisted(payload)
             _box_ids, devices = split_box_info(payload)
             devices = self._hold_outdoor(devices)
             self._persist_cookies()
             data = {device.unique_key: device for device in devices}
-            self._overlay_pending(data)
+            self._overlay_pending(data, started)
             return data
 
     def note_outdoor(self, key: str, value: float, updated_at: datetime | None = None) -> bool:
@@ -273,12 +288,15 @@ class SharpCoordinator(DataUpdateCoordinator[dict[str, Aircon]]):
             return base
         return with_updates(base, **active)
 
-    def _overlay_pending(self, data: dict[str, Aircon]) -> None:
-        """Keep each unexpired write until a poll shows that field or its deadline passes."""
-        now = _monotonic()
+    def _overlay_pending(self, data: dict[str, Aircon], read_at: float) -> None:
+        """Keep each unexpired write until a poll shows that field or its deadline passes.
+
+        ``read_at`` is when this poll started, before ``box_info`` returned. A
+        reading that was already in flight is not a newer look at a later write.
+        """
         for key, device in data.items():
             self._fresh[key] = device
-            self._fresh_at[key] = now
+            self._fresh_at[key] = read_at
         for key in list(self._pending):
             device = data.get(key)
             if device is None:
