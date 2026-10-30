@@ -1940,7 +1940,14 @@ async def test_homekit_fan_slider_maps_each_speed_and_auto_is_separate(hass, mon
     coordinator = _coordinator(hass, cloud, device)
     entity = await _climate(hass, coordinator, device)
     try:
-        assert entity.fan_modes == ["auto", *_HK_FAN_ORDER]
+        assert entity.fan_modes == [
+            "auto",
+            *_HK_FAN_ORDER,
+            "quiet",
+            "very_weak",
+            "weak",
+            "strong",
+        ]
         assert entity.fan_mode == "low"
         ordered = [speed for speed in _HK_FAN_ORDER if speed in entity.fan_modes]
         assert ordered == list(_HK_FAN_ORDER)
@@ -1957,6 +1964,35 @@ async def test_homekit_fan_slider_maps_each_speed_and_auto_is_separate(hass, mon
         device.fan = "very_weak"
         coordinator.data[device.unique_key] = device
         assert entity.fan_mode == "middle"
+    finally:
+        await entity.async_remove()
+        await coordinator.async_shutdown()
+
+
+async def test_old_fan_names_and_down_still_set_the_same_positions(hass, monkeypatch):
+    """quiet, very_weak, weak, and strong still set the four speeds. down still sets Fully down."""
+    _install_clock(monkeypatch)
+    cloud = _Cloud(_Clock())
+    device = _vane_device(vertical="level", horizontal="straight")
+    coordinator = _coordinator(hass, cloud, device)
+    entity = await _climate(hass, coordinator, device)
+    try:
+        assert entity.fan_modes[-4:] == ["quiet", "very_weak", "weak", "strong"]
+        for old, shown, code in (
+            ("quiet", "low", "31"),
+            ("very_weak", "middle", "33"),
+            ("weak", "medium", "35"),
+            ("strong", "high", "37"),
+        ):
+            await entity.async_set_fan_mode(old)
+            assert cloud.sent[-1][1][0]["valueSingle"]["code"] == code
+            assert entity.fan_mode == shown
+
+        assert entity.swing_modes is not None
+        assert "down" in entity.swing_modes
+        await entity.async_set_swing_mode("down")
+        assert bytes.fromhex(cloud.sent[-1][1][0]["valueBinary"]["code"])[48] == 0x05
+        assert entity.swing_mode == "on"
     finally:
         await entity.async_remove()
         await coordinator.async_shutdown()

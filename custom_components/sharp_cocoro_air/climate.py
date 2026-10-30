@@ -83,6 +83,8 @@ _FAN_TO_HOMEKIT = {
     "strong": "high",
 }
 _HOMEKIT_FAN_MODES = ("auto", "low", "middle", "medium", "high")
+# Same speeds as low, middle, medium, and high. Kept so existing automations still set them.
+_LEGACY_FAN_MODES = ("quiet", "very_weak", "weak", "strong")
 
 
 def _known_vane(name: str | None) -> str | None:
@@ -315,12 +317,13 @@ class SharpClimate(CoordinatorEntity[SharpCoordinator], ClimateEntity):
 
     @property
     def fan_modes(self) -> list[str]:
-        """Fan speeds HomeKit can map, plus Rapid when the unit lists it.
+        """Fan speeds HomeKit can map, plus the older names and Rapid.
 
         The order is Auto, then low, middle, medium, and high. HomeKit uses
-        that order for the slider and treats auto as its own toggle.
+        that order for the slider and treats auto as its own toggle. The older
+        names set the same four speeds.
         """
-        modes = list(_HOMEKIT_FAN_MODES)
+        modes = [*_HOMEKIT_FAN_MODES, *_LEGACY_FAN_MODES]
         device = self._device
         if device is not None and device.caps.rapid:
             modes.append(FAN_RAPID)
